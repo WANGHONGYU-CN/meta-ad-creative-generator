@@ -1,0 +1,5 @@
+streamlit>=1.40
+anthropic>=1.0
+openai>=1.60
+pillow>=10.0
+openpyxl>=3.1
