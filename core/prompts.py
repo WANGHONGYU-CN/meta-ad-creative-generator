@@ -1,4 +1,4 @@
-"""4 套提示词模板的默认值、读写与变量渲染。
+"""7 套提示词模板的默认值、读写与变量渲染。
 
 模板中的变量写作 {variable_name}，渲染时逐个字符串替换（不用 str.format，
 这样模板里可以放 JSON 示例的花括号而不需要转义）。
@@ -93,6 +93,47 @@ Style: photorealistic commercial advertising photography, natural soft lighting,
     {"angle": "文案角度（中文标注）", "headline": "英文标题", "primary_text": "英文主文案"}
   ]
 }""",
+    },
+    "ratio_adapt": {
+        "name": "⑤ 尺寸改版",
+        "description": "双尺寸时把 4:5 母版图改成其他比例（直接发给生图模型，内容保持不变）",
+        "variables": ["target_ratio"],
+        "template": """Recompose this exact image into a {target_ratio} aspect ratio while keeping the content identical: the same subject, the same product, the same people, the same background, the same lighting, colors and style. Do not add or remove any elements. Only adjust the framing and composition so the scene fits the {target_ratio} format naturally. Absolutely no text, no letters, no watermark, no logo overlays, no borders in the image.""",
+    },
+    "refine_text": {
+        "name": "⑥ 结果修改（对话）",
+        "description": "各环节文字结果（场景/提示词/文案）按用户修改意见迭代修订",
+        "variables": ["task_context", "current_output", "history", "feedback"],
+        "template": """你是 Meta 广告素材工作流中的修改助手。用户对某一步的 AI 产出不满意，请根据用户的修改意见修订结果。
+
+当前环节：{task_context}
+
+当前结果（JSON）：
+{current_output}
+
+此前几轮的用户修改意见（可能为空，仅供理解上下文，当前结果已包含这些修改）：
+{history}
+
+用户本轮修改意见：
+{feedback}
+
+要求：
+1. 只按本轮意见修改，用户没提到的部分保持原样
+2. 修改后的内容必须保持与「当前结果」完全相同的 JSON 结构和字段名
+3. 严格按以下 JSON 格式输出，不要输出 JSON 以外的任何内容：
+{
+  "result": <修改后的完整结果，结构与「当前结果」完全一致>
+}""",
+    },
+    "image_refine": {
+        "name": "⑦ 图片修改（对话）",
+        "description": "按用户修改意见在原图基础上编辑图片（直接发给生图模型）",
+        "variables": ["feedback"],
+        "template": """Edit this image according to the following instruction, while keeping everything else (subject, product, composition, lighting, style, colors) unchanged. The instruction may be written in Chinese:
+
+{feedback}
+
+Absolutely no text, no letters, no watermark, no logo overlays, no borders in the image.""",
     },
 }
 

@@ -94,6 +94,11 @@ image_model = model_selector(
 openai_base_url = st.text_input(
     "生图 Base URL（可选，走中转/代理时填写）", value=config["openai_base_url"]
 )
+image_concurrency = st.number_input(
+    "生图并发数（同时生成几张图；网关限流/频繁失败时调低到 1）",
+    min_value=1, max_value=5,
+    value=int(config.get("image_concurrency") or 2),
+)
 
 st.divider()
 
@@ -108,6 +113,7 @@ with col_save:
                 "openai_api_key": openai_key.strip(),
                 "openai_base_url": openai_base_url.strip(),
                 "image_model": image_model.strip(),
+                "image_concurrency": int(image_concurrency),
             }
         )
         st.success("已保存到 config.json")

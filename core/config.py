@@ -18,6 +18,7 @@ DEFAULT_CONFIG = {
     "openai_api_key": "",
     "openai_base_url": "",
     "image_model": "gpt-image-1",
+    "image_concurrency": 2,
 }
 
 # config.json 中留空的字段，从这些环境变量兜底

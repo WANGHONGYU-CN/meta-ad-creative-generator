@@ -1,4 +1,4 @@
-"""提示词管理页：4 套提示词在线编辑、保存、恢复默认。"""
+"""提示词管理页：7 套提示词在线编辑、保存、恢复默认。"""
 import streamlit as st
 
 from core.prompts import DEFAULT_PROMPTS, load_prompts, save_prompts

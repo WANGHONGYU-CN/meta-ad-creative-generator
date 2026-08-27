@@ -82,6 +82,43 @@ def generate_image(
     raise last_error
 
 
+def edit_image(
+    config: dict,
+    image_bytes: bytes,
+    prompt: str,
+    ratio: str,
+    retries: int = 2,
+) -> bytes:
+    """以一张已有成品图为输入做编辑（尺寸改版 / 按修改意见调整），返回 PNG bytes。
+
+    与 generate_image 的区别：输入是成品图本身而非产品参考图，用于
+    「4:5 母版改 1:1」和「图片对话式修改」两个场景。
+    """
+    if ratio not in RATIO_SPECS:
+        raise ValueError(f"不支持的比例：{ratio}")
+    size, crop_target = RATIO_SPECS[ratio]
+    client = get_client(config)
+
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            result = client.images.edit(
+                model=config["image_model"],
+                image=[("current.png", image_bytes, "image/png")],
+                prompt=prompt,
+                size=size,
+            )
+            png_bytes = base64.b64decode(result.data[0].b64_json)
+            if crop_target:
+                png_bytes = _center_crop(png_bytes, crop_target)
+            return png_bytes
+        except Exception as e:  # noqa: BLE001 - 统一重试后上抛
+            last_error = e
+            if attempt < retries:
+                time.sleep(3 * (attempt + 1))
+    raise last_error
+
+
 # 用这些关键词从网关全量模型里筛出生图模型
 IMAGE_MODEL_KEYWORDS = ("image", "dall", "seedream", "flux", "banana", "imagen")
 
