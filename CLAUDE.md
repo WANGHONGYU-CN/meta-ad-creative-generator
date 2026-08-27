@@ -32,7 +32,7 @@
 
 ## 数据与接口协议（未经确认不得变更）
 
-- **config.json**：`anthropic_api_key / anthropic_base_url / claude_model / openai_api_key / openai_base_url / image_model / image_concurrency`
+- **config.json**：`anthropic_api_key / anthropic_base_url / claude_model / openai_api_key / openai_base_url / image_model`
 - **环境变量**：`ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / OPENAI_API_KEY / OPENAI_BASE_URL`（存于用户 WSL `~/.bashrc`，config.json 留空时生效）
 - **prompts.json**：7 个 key：`scene_mining / image_prompt_gen / image_style_template / copywriting / ratio_adapt / refine_text / image_refine`，各含 `name/description/variables/template`
 - **manifest.json**：`{product_info, updated_at, jobs: [{main_scene, sub_scene, sub_scene_desc, ratio, image_prompt, filename, image_path, copies, derived_from}]}`（`derived_from`：该图由哪张母版图改尺寸而来，普通图为空串）
@@ -44,9 +44,9 @@
 - [x] 四步工作流全流程（找场景→提示词→生图→文案→导出），每步可人工编辑干预
 - [x] 尺寸选择：1:1 / 4:5 / 双尺寸；4:5 通过 1024×1536 生成后居中裁切 1024×1280 实现
 - [x] 双尺寸母版派生：先出 4:5 母版，再用「尺寸改版」提示词把成品改成内容一致的 1:1；母版重生成/被修改后派生图自动失效待重做
-- [x] 场景结果卡片式单选 UI（按主场景分组，点卡片单选细分场景）
+- [x] 场景结果卡片式多选 UI（按主场景分组，点卡片勾选/取消细分场景）
 - [x] 四处持续对话修改：场景 / 生图提示词 / 图片（原图基础上重绘，可回退上一版）/ 文案，入参 = 当前结果 + 修改意见 + 历史意见
-- [x] 生图并发：独立图按 `image_concurrency`（设置页可调 1-5，默认 2）线程池并行，派生图依赖母版串行
+- [x] 生图并发：独立图全部并行提交、不设并发上限（限流交给 API 侧 + 重试退避），派生图依赖母版串行
 - [x] 图生图：上传产品参考图走 `images.edit`
 - [x] 单张图重新生成
 - [x] 7 套提示词在线编辑/恢复默认
@@ -59,7 +59,6 @@
 
 - [ ] 非 OpenAI 系生图模型的尺寸适配（seedream 原生支持 4:5、gemini-image 参数不同），换模型前需适配
 - [ ] outputs 历史 run 的浏览/恢复页面（manifest 已落盘，UI 未做）
-- [ ] 生图网关并发上限实测（需花少量生图费用，经用户同意后跑探测脚本，再定 `image_concurrency` 默认值）
 - [ ] 待用户提出
 
 ## 重要技术决策
@@ -74,7 +73,7 @@
 8. **venv 必须放 WSL 原生磁盘**（`~/venvs/meta-creative-tool`），不能放项目目录：项目在 /mnt/c（9p 文件系统），venv 放那里冷启动 import 需 35 秒+，WSL 侧仅 1 秒。同理 `.streamlit/config.toml` 设了 `fileWatcherType = "none"`。**不要把 venv 建回项目目录**。
 9. **双尺寸 = 母版派生而非独立双生成**：4:5 为母版，1:1 用 `ratio_adapt` 提示词 + `imagen.edit_image()`（输入为母版成品图）改尺寸得到，保证两个尺寸内容一致。job 的 `derived_from` 字段记录母版文件名；母版图变化时派生图必须失效。注意 `images.edit` 是重绘，内容"高度一致"而非像素级一致。
 10. **对话式修改的实现**：文字类（场景/提示词/文案）统一走 `refine_text` 提示词，要求模型返回 `{"result": <与当前结果同构>}`；图片走 `image_refine` 提示词 + `edit_image()`（原图为输入），保留 `prev_image_bytes` 支持回退一版。对话历史存 session_state（key 前缀 `chat_*`，含 `jobs_gen` 批次号隔离）。
-11. **生图并发**：线程池只用于相互独立的母版图，线程内不访问 `st.session_state`（参数在主线程取好再提交）；派生图依赖母版必须串行。并发数走 config `image_concurrency`（默认 2），网关真实限流未实测，遇 429 应调低。
+11. **生图并发**：线程池只用于相互独立的母版图，线程内不访问 `st.session_state`（参数在主线程取好再提交）；派生图依赖母版必须串行。按用户要求**不设并发上限**（`max_workers=任务数`），限流由 API 侧兜底 + `generate_image` 自带重试退避。
 
 ## 协作规范（Claude 必须遵守）
 
@@ -111,4 +110,5 @@
 
 - 2026-08-27：项目初始化——四步工作流、提示词管理、设置页、key 环境变量方案、模型下拉框、连通性全链路测通；建立 git 仓库与本规范。
 - 2026-08-27：修复页面加载慢（35s+→秒级）——venv 迁至 WSL 原生磁盘 `~/venvs/meta-creative-tool`，关闭文件监听（决策 8）。
-- 2026-08-27：三项功能升级——①双尺寸改为母版派生（4:5 成品改尺寸出 1:1，内容一致，新增 `ratio_adapt` 提示词与 `imagen.edit_image()`）；②场景卡片单选 UI + 场景/提示词/图片/文案四处持续对话修改（新增 `refine_text`、`image_refine` 提示词）；③生图并发可配（config 新增 `image_concurrency`）。提示词 4→7 套，manifest job 新增 `derived_from` 字段。
+- 2026-08-27：三项功能升级——①双尺寸改为母版派生（4:5 成品改尺寸出 1:1，内容一致，新增 `ratio_adapt` 提示词与 `imagen.edit_image()`）；②场景卡片 UI + 场景/提示词/图片/文案四处持续对话修改（新增 `refine_text`、`image_refine` 提示词）；③生图并发。提示词 4→7 套，manifest job 新增 `derived_from` 字段。
+- 2026-08-27：按用户反馈调整——场景卡片改回多选（点卡片勾选/取消）；生图并发不设上限（去掉 `image_concurrency` 配置项，限流交给 API 侧）。

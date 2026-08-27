@@ -1,12 +1,13 @@
 """主工作流页：输入 → 找场景 → 生成生图提示词 → 生图 → 看图写文案 → 导出。
 
 关键机制：
-- 场景卡片单选：Step 1 结果以卡片渲染，单选一个细分场景进入后续步骤
+- 场景卡片多选：Step 1 结果以卡片渲染，点卡片勾选/取消若干细分场景进入后续步骤
 - 双尺寸 = 母版派生：先生成 4:5 母版，再用「尺寸改版」提示词把成品改成 1:1（内容不变）；
   母版重新生成/被修改后，派生图自动失效待重做
 - 持续对话修改：场景 / 生图提示词 / 图片 / 文案 四处均有对话框，
   入参 = 当前结果 + 用户修改意见 + 历史意见，输出替换当前结果
-- 生图并发：独立图（母版）按设置页的并发数并行生成，派生图依赖母版串行
+- 生图并发：独立图（母版）全部并行提交，不设并发上限，由 API 侧限流兜底
+  （generate_image 自带重试退避）；派生图依赖母版串行
 """
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,7 +29,7 @@ if not config["anthropic_api_key"] or not config["openai_api_key"]:
 
 ss = st.session_state
 ss.setdefault("scenes", [])          # [{main_scene, sub_scene, description}]
-ss.setdefault("selected_scene", None)  # 单选的场景下标
+ss.setdefault("selected_scenes", [])  # 多选的场景下标列表
 ss.setdefault("jobs", [])            # 每个 job = 一张图（场景 x 尺寸）
 ss.setdefault("jobs_gen", 0)         # job 批次号，用于隔离各批次的 widget/对话状态
 ss.setdefault("run_dir", None)
@@ -140,7 +141,7 @@ if st.button("🔍 AI 挖掘场景", type="primary", disabled=not product_info.s
                         }
                     )
             ss.scenes = rows
-            ss.selected_scene = None
+            ss.selected_scenes = []
             ss.jobs = []
             ss.pop("chat_scenes", None)
         except Exception as e:  # noqa: BLE001
@@ -171,12 +172,12 @@ def apply_scene_feedback(feedback: str):
         for r in rows
         if isinstance(r, dict) and r.get("sub_scene")
     ]
-    ss.selected_scene = None
+    ss.selected_scenes = []
 
 
-selected_row = None
+selected_rows = []
 if ss.scenes:
-    st.caption("点击卡片单选一个细分场景；对结果不满意可在下方对话框让 AI 修改。")
+    st.caption("点击卡片勾选/取消细分场景（可多选）；对结果不满意可在下方对话框让 AI 修改。")
     groups = {}
     for idx, row in enumerate(ss.scenes):
         groups.setdefault(row.get("main_scene", ""), []).append(idx)
@@ -185,27 +186,30 @@ if ss.scenes:
         cols = st.columns(3)
         for n, idx in enumerate(indices):
             row = ss.scenes[idx]
-            picked = ss.selected_scene == idx
+            picked = idx in ss.selected_scenes
             with cols[n % 3], st.container(border=True):
                 st.markdown(f"**{'✅ ' if picked else ''}{row.get('sub_scene', '')}**")
                 st.caption(row.get("description", "") or "—")
                 if st.button(
-                    "已选中" if picked else "选择这个场景",
+                    "已选中（点击取消）" if picked else "选择这个场景",
                     key=f"scene_pick_{idx}",
                     type="primary" if picked else "secondary",
                     use_container_width=True,
                 ):
-                    ss.selected_scene = idx
+                    if picked:
+                        ss.selected_scenes = [i for i in ss.selected_scenes if i != idx]
+                    else:
+                        ss.selected_scenes = ss.selected_scenes + [idx]
                     st.rerun()
     with st.expander("💬 对场景结果不满意？让 AI 修改", expanded=False):
         chat_box("chat_scenes", apply_scene_feedback, placeholder="例：场景太泛了，聚焦冬季户外；把第 2 个主场景换成送礼场景…")
 
-    if ss.selected_scene is not None and ss.selected_scene < len(ss.scenes):
-        selected_row = ss.scenes[ss.selected_scene]
-        extra = "（4:5 母版 + 改尺寸 1:1）" if dual_mode else ""
+    selected_rows = [ss.scenes[i] for i in ss.selected_scenes if i < len(ss.scenes)]
+    if selected_rows:
+        extra = "（每个场景 = 4:5 母版 + 改尺寸 1:1）" if dual_mode else ""
         st.caption(
-            f"已选：**{selected_row['main_scene']} / {selected_row['sub_scene']}** × "
-            f"{len(ratios)} 个尺寸 = 将生成 {len(ratios)} 张图{extra}"
+            f"已选 **{len(selected_rows)}** 个细分场景 × {len(ratios)} 个尺寸 = "
+            f"将生成 {len(selected_rows) * len(ratios)} 张图{extra}"
         )
     else:
         st.caption("尚未选择场景。")
@@ -216,16 +220,21 @@ st.divider()
 st.header("Step 2 · 生成生图提示词")
 g = ss.jobs_gen
 
-if st.button("✏️ 为选中场景生成提示词", type="primary", disabled=selected_row is None):
+if st.button("✏️ 为选中场景生成提示词", type="primary", disabled=not selected_rows):
     ss.jobs_gen = g = g + 1
     # 清理上一批 job 的对话历史
     for k in [k for k in list(ss.keys()) if k.startswith(("chat_prompt_", "chat_image_", "chat_copies_"))]:
         del ss[k]
-    row = selected_row
     master_ratios = ["4:5"] if dual_mode else ratios
     jobs = []
-    with st.spinner("生成生图提示词中…"):
+    total = len(selected_rows) * len(master_ratios)
+    progress = st.progress(0.0, text="生成提示词中…")
+    done = 0
+    for row in selected_rows:
+        master_filename = ""
         for ratio in master_ratios:
+            done += 1
+            progress.progress(done / total, text=f"生成提示词 {done}/{total}：{row['sub_scene']}（{ratio}）")
             try:
                 prompt = render(
                     prompts["image_prompt_gen"]["template"],
@@ -242,6 +251,7 @@ if st.button("✏️ 为选中场景生成提示词", type="primary", disabled=s
             except Exception as e:  # noqa: BLE001
                 st.error(f"「{row['sub_scene']}（{ratio}）」提示词生成失败：{e}")
                 image_prompt = ""
+            master_filename = store.image_filename(row["main_scene"], row["sub_scene"], ratio)
             jobs.append(
                 {
                     "main_scene": row["main_scene"],
@@ -249,7 +259,7 @@ if st.button("✏️ 为选中场景生成提示词", type="primary", disabled=s
                     "sub_scene_desc": row.get("description", ""),
                     "ratio": ratio,
                     "image_prompt": image_prompt,
-                    "filename": store.image_filename(row["main_scene"], row["sub_scene"], ratio),
+                    "filename": master_filename,
                     "image_bytes": None,
                     "image_path": "",
                     "copies": [],
@@ -258,23 +268,24 @@ if st.button("✏️ 为选中场景生成提示词", type="primary", disabled=s
                     "rev": 0,
                 }
             )
-    if dual_mode and jobs:
-        jobs.append(
-            {
-                "main_scene": row["main_scene"],
-                "sub_scene": row["sub_scene"],
-                "sub_scene_desc": row.get("description", ""),
-                "ratio": "1:1",
-                "image_prompt": "",  # 派生图与母版共用提示词，改尺寸时回填
-                "filename": store.image_filename(row["main_scene"], row["sub_scene"], "1:1"),
-                "image_bytes": None,
-                "image_path": "",
-                "copies": [],
-                "derived_from": jobs[0]["filename"],
-                "prev_image_bytes": None,
-                "rev": 0,
-            }
-        )
+        if dual_mode and master_filename:
+            jobs.append(
+                {
+                    "main_scene": row["main_scene"],
+                    "sub_scene": row["sub_scene"],
+                    "sub_scene_desc": row.get("description", ""),
+                    "ratio": "1:1",
+                    "image_prompt": "",  # 派生图与母版共用提示词，改尺寸时回填
+                    "filename": store.image_filename(row["main_scene"], row["sub_scene"], "1:1"),
+                    "image_bytes": None,
+                    "image_path": "",
+                    "copies": [],
+                    "derived_from": master_filename,
+                    "prev_image_bytes": None,
+                    "rev": 0,
+                }
+            )
+    progress.empty()
     ss.jobs = jobs
 
 
@@ -353,19 +364,19 @@ def run_generation(master_indices: list, derived_indices: list):
     if not ss.run_dir:
         ss.run_dir = store.create_run_dir(product_info[:20])
     ref_images = [(f.name, f.getvalue(), f.type or "image/png") for f in (uploaded_refs or [])]
-    concurrency = max(1, int(config.get("image_concurrency") or 1))
     total = len(master_indices) + len(derived_indices)
     progress = st.progress(0.0, text="生图中…")
     done = 0
 
-    # 母版/独立图：并发生成。线程内不碰 session_state，参数先在主线程取好
+    # 母版/独立图：全部并行提交，不设并发上限，限流交给 API 侧（generate_image 自带重试退避）。
+    # 线程内不碰 session_state，参数先在主线程取好
     tasks = []
     for i in master_indices:
         job = ss.jobs[i]
         final_prompt = render(prompts["image_style_template"]["template"], {"image_prompt": job["image_prompt"]})
         tasks.append((i, final_prompt, job["ratio"]))
     if tasks:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
             futures = {
                 pool.submit(imagen.generate_image, config, p, r, ref_images): i
                 for i, p, r in tasks
