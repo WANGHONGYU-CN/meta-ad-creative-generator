@@ -14,7 +14,7 @@
 - **形态**：Python 3.12 + Streamlit 本地 Web 应用（WSL 中运行，Windows 浏览器访问 localhost:8501）
 - **LLM**：Anthropic API（走中转站 `ai.deepthink.works`），负责挖场景、写生图提示词、看图写文案
 - **生图**：OpenAI 兼容接口（走网关 `ai-gateway.deepthink.works/v1`），默认 `gpt-image-1`
-- **启动**：`.venv/bin/streamlit run app.py`（venv 在项目内）
+- **启动**：`~/venvs/meta-creative-tool/bin/streamlit run app.py`（venv 在 WSL 原生磁盘，见技术决策 8）
 
 ## 模块说明
 
@@ -66,6 +66,7 @@
 5. **页面目录叫 `pages_`**（带下划线）：避免触发 Streamlit 旧版自动多页机制，导航由 `st.navigation` 显式声明。
 6. **LLM JSON 输出**：靠提示词约定 + `_extract_json()` 容错解析（剥代码围栏/前后杂文），未用 structured outputs（需兼容中转站）。
 7. **依赖版本**：anthropic 1.x（基于 httpx2）、openai 3.x、streamlit 1.62。venv 用 `--without-pip` + get-pip.py 创建（WSL 无 python3-venv 包且无 sudo）。
+8. **venv 必须放 WSL 原生磁盘**（`~/venvs/meta-creative-tool`），不能放项目目录：项目在 /mnt/c（9p 文件系统），venv 放那里冷启动 import 需 35 秒+，WSL 侧仅 1 秒。同理 `.streamlit/config.toml` 设了 `fileWatcherType = "none"`。**不要把 venv 建回项目目录**。
 
 ## 协作规范（Claude 必须遵守）
 
@@ -101,3 +102,4 @@
 ## 变更日志
 
 - 2026-08-27：项目初始化——四步工作流、提示词管理、设置页、key 环境变量方案、模型下拉框、连通性全链路测通；建立 git 仓库与本规范。
+- 2026-08-27：修复页面加载慢（35s+→秒级）——venv 迁至 WSL 原生磁盘 `~/venvs/meta-creative-tool`，关闭文件监听（决策 8）。

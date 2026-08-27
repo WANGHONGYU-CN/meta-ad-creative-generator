@@ -8,11 +8,13 @@
 ## 启动
 
 ```bash
-cd meta-creative-tool
-.venv/bin/streamlit run app.py
+cd /mnt/c/Users/yueg0/meta-creative-tool
+~/venvs/meta-creative-tool/bin/streamlit run app.py
 ```
 
-浏览器会自动打开（默认 http://localhost:8501）。
+然后在浏览器打开 http://localhost:8501。
+
+> 依赖 venv 放在 WSL 原生磁盘（`~/venvs/meta-creative-tool`）而不是项目目录——项目在 C 盘（9p 文件系统），venv 放这里冷启动要 35 秒+，放 WSL 侧只要 1 秒。重装依赖：`~/venvs/meta-creative-tool/bin/pip install -r requirements.txt`。
 
 ## 第一次使用
 
