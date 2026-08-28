@@ -103,6 +103,9 @@ def persist():
 def _clear_chat_keys():
     for k in [k for k in list(ss.keys()) if str(k).startswith("chat_")]:
         del ss[k]
+    # 上传指纹跟任务走：切换/新建任务后重置，让上传框里的文件重新存进新任务
+    for k in ("_fp_refs", "_fp_style", "_fp_logo"):
+        ss.pop(k, None)
 
 
 def _fill_ss_from_state(state: dict):
@@ -296,6 +299,38 @@ with col_logo:
     )
     if not uploaded_logos and ss.logo_images:
         st.caption("本任务已保存 Logo，生图时继续使用；重新上传即替换。")
+
+
+def _sync_uploads():
+    """上传后立即落盘。后台任务锁页（st.stop）或切页时 Streamlit 会丢弃未渲染
+    组件的状态——file_uploader 里的文件会消失，等到点生图才存就晚了。
+    按 文件名+大小 指纹判断是否有新上传，避免每次重跑重复写盘。"""
+    if not ss.run_dir:
+        return  # 任务还没创建，创建后的下一次重跑会自动补存
+    groups = (
+        ([(f.name, f.getvalue()) for f in uploaded_refs or []],
+         "ref_images", runstate.REFS_DIRNAME, "_fp_refs"),
+        ([(f.name, f.getvalue()) for f in uploaded_styles or []],
+         "style_images", runstate.STYLE_REFS_DIRNAME, "_fp_style"),
+        ([(uploaded_logos.name, uploaded_logos.getvalue())] if uploaded_logos else [],
+         "logo_images", runstate.LOGO_REFS_DIRNAME, "_fp_logo"),
+    )
+    changed = False
+    for files, attr, dirname, fp_key in groups:
+        if not files:
+            continue
+        fp = [(n, len(b)) for n, b in files]
+        if ss.get(fp_key) == fp:
+            continue
+        ss[attr] = runstate.save_ref_images(ss.run_dir, files, dirname=dirname)
+        ss[fp_key] = fp
+        changed = True
+    if changed:
+        persist()
+
+
+_sync_uploads()
+
 col_ratio, col_count = st.columns(2)
 with col_ratio:
     ratio_choice = st.radio("生图尺寸", RATIO_LABELS, horizontal=True, key="ratio_choice")
