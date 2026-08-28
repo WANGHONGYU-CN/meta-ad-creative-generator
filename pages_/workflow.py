@@ -326,7 +326,7 @@ def _scene_prompt_desc(row: dict) -> str:
 
 if st.button("🔍 AI 挖掘场景", type="primary", disabled=not product_info.strip()):
     mined = False
-    with st.spinner("Claude 正在挖掘场景…（新版提示词需内部筛选候选，可能要 1-3 分钟）"):
+    with st.spinner("Claude 正在挖掘场景…（内部生成候选并逐个评分，可能要 1-3 分钟）"):
         try:
             excluded = db.excluded_scene_names(product_info)
             prompt = render(
@@ -384,9 +384,44 @@ def apply_scene_feedback(feedback: str):
 selected_rows = []
 if ss.scenes:
     st.caption("点击卡片勾选/取消细分场景（可多选）；对结果不满意可在下方对话框让 AI 修改。")
+
+    # 筛选器：只影响卡片展示，不影响已勾选状态（无评分的老场景在分数筛选 >0 时会被隐藏）
+    main_names = list(dict.fromkeys(row.get("main_scene", "") for row in ss.scenes))
+    has_scores = any(
+        (row.get("detail") or {}).get("total_score") is not None for row in ss.scenes
+    )
+    fcol1, fcol2 = st.columns([3, 2])
+    with fcol1:
+        picked_mains = st.multiselect(
+            "筛选主场景（不选 = 全部）", main_names, key=f"scene_filter_main_{tok}"
+        )
+    with fcol2:
+        min_score = (
+            st.slider("最低综合评分", 0, 100, 0, key=f"scene_filter_score_{tok}")
+            if has_scores
+            else 0
+        )
+
+    def _scene_visible(row: dict) -> bool:
+        if picked_mains and row.get("main_scene", "") not in picked_mains:
+            return False
+        if min_score > 0:
+            score = (row.get("detail") or {}).get("total_score")
+            if not isinstance(score, (int, float)) or score < min_score:
+                return False
+        return True
+
+    visible = [idx for idx, row in enumerate(ss.scenes) if _scene_visible(row)]
+    if len(visible) < len(ss.scenes):
+        hidden_picked = sum(
+            1 for i in ss.selected_scenes if i < len(ss.scenes) and i not in visible
+        )
+        note = f"（其中 {hidden_picked} 个已勾选场景被筛选隐藏，勾选状态不受影响）" if hidden_picked else ""
+        st.caption(f"筛选后显示 {len(visible)} / {len(ss.scenes)} 个细分场景{note}")
+
     groups = {}
-    for idx, row in enumerate(ss.scenes):
-        groups.setdefault(row.get("main_scene", ""), []).append(idx)
+    for idx in visible:
+        groups.setdefault(ss.scenes[idx].get("main_scene", ""), []).append(idx)
     for main, indices in groups.items():
         st.markdown(f"##### {main}")
         cols = st.columns(3)
