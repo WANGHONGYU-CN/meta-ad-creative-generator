@@ -117,7 +117,7 @@
 1. 所有修改必须基于当前 git 状态（改前先 `git status` / `git branch`）
 2. 修改前检查所在 branch
 3. **不直接在 main 上提交**，在 `develop` 或 `feature/*` 分支开发
-4. 每次完成任务生成 commit 建议（规范：`feat: / fix: / docs: / refactor: 中文描述`）
+4. 每次完成任务生成 commit 建议（规范：`feat: / fix: / docs: / refactor: 中文描述`），**并在用户确认功能可用后当场提交**——不要多个功能堆积在工作区（2026-08-28 曾堆积 6 个功能一次性提交，历史无法按功能拆分，引以为戒）
 5. 保持 README.md 和 CLAUDE.md 与代码同步
 
 ### 文档维护
