@@ -35,7 +35,9 @@ ss.setdefault("selected_scenes", [])  # 多选的场景下标列表
 ss.setdefault("jobs", [])             # 每个 job = 一张图（场景 x 尺寸），图片按 image_path 从盘读
 ss.setdefault("jobs_gen", 0)          # job 批次号，用于隔离各批次的 widget/对话状态
 ss.setdefault("run_dir", None)
-ss.setdefault("ref_images", [])       # 已保存的参考图相对路径（refs/xxx）
+ss.setdefault("ref_images", [])       # 已保存的产品参考图相对路径（refs/xxx）
+ss.setdefault("style_images", [])     # 海报风格参考图相对路径（refs_style/xxx）
+ss.setdefault("logo_images", [])      # 品牌 Logo 图相对路径（refs_logo/xxx）
 ss.setdefault("ratio_choice", None)
 ss.setdefault("title_count", 3)
 
@@ -85,6 +87,8 @@ def state_from_ss() -> dict:
         "jobs": ss.jobs,
         "jobs_gen": ss.jobs_gen,
         "ref_images": ss.ref_images,
+        "style_images": ss.style_images,
+        "logo_images": ss.logo_images,
         "chats": {str(k): v for k, v in ss.items() if str(k).startswith("chat_")},
     }
 
@@ -114,6 +118,8 @@ def _fill_ss_from_state(state: dict):
     ss.jobs = state.get("jobs", [])
     ss.jobs_gen = int(state.get("jobs_gen", 0))
     ss.ref_images = state.get("ref_images", [])
+    ss.style_images = state.get("style_images", [])
+    ss.logo_images = state.get("logo_images", [])
     for k, v in (state.get("chats") or {}).items():
         ss[k] = v
 
@@ -133,6 +139,7 @@ def _new_task():
     ss.run_dir = None
     ss.scenes, ss.selected_scenes, ss.jobs = [], [], []
     ss.jobs_gen, ss.ref_images = 0, []
+    ss.style_images, ss.logo_images = [], []
     ss["product_info"] = ""
     ss.ratio_choice = RATIO_LABELS[0]
     ss["title_count"] = 3
@@ -264,13 +271,31 @@ product_info = st.text_area(
     key="product_info",
     placeholder="例：便携颈挂风扇，卖点是超静音/续航18小时/可折叠，目标人群是欧美户外通勤人群，目标市场美国…",
 )
-uploaded_refs = st.file_uploader(
-    "产品参考图（生图时作为图生图参考，建议 1-3 张白底或实拍图）",
-    type=["png", "jpg", "jpeg", "webp"],
-    accept_multiple_files=True,
-)
-if not uploaded_refs and ss.ref_images:
-    st.caption(f"本任务已保存 {len(ss.ref_images)} 张参考图，生图时继续使用；重新上传即替换。")
+col_ref, col_style, col_logo = st.columns(3)
+with col_ref:
+    uploaded_refs = st.file_uploader(
+        "产品参考图（建议 1-3 张白底或实拍图，生图时如实还原产品）",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+    )
+    if not uploaded_refs and ss.ref_images:
+        st.caption(f"本任务已保存 {len(ss.ref_images)} 张产品参考图，生图时继续使用；重新上传即替换。")
+with col_style:
+    uploaded_styles = st.file_uploader(
+        "海报风格参考图（可选，1-3 张，生成的海报会贴近其风格/配色/排版气质）",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+    )
+    if not uploaded_styles and ss.style_images:
+        st.caption(f"本任务已保存 {len(ss.style_images)} 张风格参考图；重新上传即替换。")
+with col_logo:
+    uploaded_logos = st.file_uploader(
+        "品牌 Logo（可选，1 张，建议透明底 PNG，会原样放进海报角落）",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=False,
+    )
+    if not uploaded_logos and ss.logo_images:
+        st.caption("本任务已保存 Logo，生图时继续使用；重新上传即替换。")
 col_ratio, col_count = st.columns(2)
 with col_ratio:
     ratio_choice = st.radio("生图尺寸", RATIO_LABELS, horizontal=True, key="ratio_choice")
@@ -571,8 +596,21 @@ def _submit_images(master_indices: list, derived_indices: list):
         ss.ref_images = runstate.save_ref_images(
             ss.run_dir, [(f.name, f.getvalue()) for f in uploaded_refs]
         )
+    if uploaded_styles:
+        ss.style_images = runstate.save_ref_images(
+            ss.run_dir, [(f.name, f.getvalue()) for f in uploaded_styles],
+            dirname=runstate.STYLE_REFS_DIRNAME,
+        )
+    if uploaded_logos:
+        ss.logo_images = runstate.save_ref_images(
+            ss.run_dir, [(uploaded_logos.name, uploaded_logos.getvalue())],
+            dirname=runstate.LOGO_REFS_DIRNAME,
+        )
     persist()
-    bg.submit_image_generation(config, prompts, ss.run_dir, master_indices, derived_indices, ss.ref_images)
+    bg.submit_image_generation(
+        config, prompts, ss.run_dir, master_indices, derived_indices,
+        ss.ref_images, ss.style_images, ss.logo_images,
+    )
     st.rerun()
 
 
@@ -595,6 +633,13 @@ with col_gen:
 with col_info:
     if not uploaded_refs and not ss.ref_images:
         st.info("未上传产品参考图，将走纯文生图；上传参考图可让产品与实物一致。")
+    bits = []
+    if uploaded_styles or ss.style_images:
+        bits.append("风格参考图")
+    if uploaded_logos or ss.logo_images:
+        bits.append("品牌 Logo")
+    if bits:
+        st.caption(f"已带 {' + '.join(bits)}，生图时会随提示词一并发给模型。")
 
 
 def make_image_feedback(i: int):

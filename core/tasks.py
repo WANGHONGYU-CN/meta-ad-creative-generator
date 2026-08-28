@@ -179,16 +179,58 @@ def submit_prompt_generation(config, prompts, run_dir, product_info, selected_ro
     return _submit("prompts", run_dir, work)
 
 
-def submit_image_generation(config, prompts, run_dir, master_indices, derived_indices, ref_rel_paths) -> bool:
+def _ref_bundle(run_dir, ref_rel_paths, style_rel_paths, logo_rel_paths) -> tuple:
+    """按「产品图 → 风格图 → Logo」固定顺序组装参考图，并生成随提示词追加的英文说明。
+
+    只有产品参考图时不追加说明（保持决策 15 的原样直发）；出现风格图或 Logo 时
+    必须用说明告诉模型各张参考图的身份，否则模型无法区分。"""
+    product = runstate.load_ref_images(run_dir, ref_rel_paths)
+    style = runstate.load_ref_images(run_dir, style_rel_paths)
+    logo = runstate.load_ref_images(run_dir, logo_rel_paths)
+    images = product + style + logo
+    if not (style or logo):
+        return images, ""
+
+    def _rng(start: int, count: int) -> str:
+        return f"image {start}" if count == 1 else f"images {start}-{start + count - 1}"
+
+    lines = ["Reference images are provided in this exact order:"]
+    idx = 1
+    if product:
+        lines.append(
+            f"- {_rng(idx, len(product))}: product photo(s). Reproduce this exact product faithfully in the poster."
+        )
+        idx += len(product)
+    if style:
+        lines.append(
+            f"- {_rng(idx, len(style))}: style reference poster(s). Match their overall visual style, "
+            "color palette, lighting, mood, composition feel and typography treatment — but do NOT copy "
+            "their content, subjects, products or text."
+        )
+        idx += len(style)
+    if logo:
+        lines.append(
+            f"- {_rng(idx, len(logo))}: the brand logo. Place this exact logo, unchanged, in a clearly "
+            "visible corner of the poster: legible, correct colors and proportions, not redrawn, distorted "
+            "or recolored, with clean space around it. Do not invent any other logo."
+        )
+    return images, "\n\n" + "\n".join(lines)
+
+
+def submit_image_generation(
+    config, prompts, run_dir, master_indices, derived_indices,
+    ref_rel_paths, style_rel_paths=None, logo_rel_paths=None,
+) -> bool:
     """Step 3：母版并行生图（不设并发上限，决策 11），派生图依赖母版成品串行改尺寸。
-    job 的 image_prompt（Step 2 生成的海报提示词）即最终提示词，直接发给生图模型。"""
+    job 的 image_prompt（Step 2 生成的海报提示词）即最终提示词，直接发给生图模型；
+    有风格/Logo 参考图时在发送瞬间追加参考图身份说明（job.image_prompt 本身不变）。"""
     adapt_tpl = prompts["ratio_adapt"]["template"]
     key = Path(run_dir).name
 
     def work():
         state = runstate.load(run_dir) or runstate.default_state()
         jobs = state.get("jobs", [])
-        ref_images = runstate.load_ref_images(run_dir, ref_rel_paths)
+        ref_images, ref_note = _ref_bundle(run_dir, ref_rel_paths, style_rel_paths or [], logo_rel_paths or [])
         total = len(master_indices) + len(derived_indices)
         _set(key, total=total, text="生图中…")
         done = 0
@@ -196,7 +238,7 @@ def submit_image_generation(config, prompts, run_dir, master_indices, derived_in
         tasks = []
         for i in master_indices:
             job = jobs[i]
-            tasks.append((i, job["image_prompt"], job["ratio"]))
+            tasks.append((i, job["image_prompt"] + ref_note, job["ratio"]))
         if tasks:
             with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
                 futures = {

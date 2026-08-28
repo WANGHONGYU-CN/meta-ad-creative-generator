@@ -43,7 +43,7 @@
 - **环境变量**：`ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / OPENAI_API_KEY / OPENAI_BASE_URL`（存于用户 WSL `~/.bashrc`，config.json 留空时生效）
 - **prompts.json**：6 个 key：`scene_mining / image_prompt_gen / copywriting / ratio_adapt / refine_text / image_refine`（主流程 3 + 分支 3；`image_style_template` 已于 2026-08-28 移除），各含 `name/description/variables/template`。`scene_mining` 变量为 `product_info + excluded_scenes`，返回 13 字段细分场景结构（audience/trigger/pain_or_desire/product_use/video_purpose/visual_brief/headline_angle/selling_point/headline/subheadline/cta/score_breakdown/total_score）；解析兼容旧版 name/description 结构。`image_prompt_gen` 为**提示词生成的元提示词**（10 个变量：product_info/main_scene/sub_scene/audience/selling_point/visual_brief/aspect_ratio/headline/subheadline/cta，全部来自场景挖掘输出），Claude 返回 `{"image_prompt": ...}`（英文海报提示词，广告文字原文引用）；生图环节直接发送该提示词，无风格外壳
 - **manifest.json**：`{product_info, updated_at, jobs: [{main_scene, sub_scene, sub_scene_desc, ratio, image_prompt, filename, image_path, copies, derived_from}]}`（`derived_from`：该图由哪张母版图改尺寸而来，普通图为空串）
-- **state.json**（每 run 目录一份）：工作流完整可恢复状态 `{product_info, ratio_choice, title_count, scenes, selected_scenes, jobs, jobs_gen, ref_images, chats}`；jobs 在 manifest 字段之外多 `rev/has_prev` 运行时字段。manifest 由 state 按字段白名单派生（`runstate.MANIFEST_JOB_KEYS`），协议不受影响
+- **state.json**（每 run 目录一份）：工作流完整可恢复状态 `{product_info, ratio_choice, title_count, scenes, selected_scenes, jobs, jobs_gen, ref_images, style_images, logo_images, chats}`（`style_images`/`logo_images` 为 2026-08-28 经确认新增，老任务缺省视为空）；jobs 在 manifest 字段之外多 `rev/has_prev` 运行时字段。manifest 由 state 按字段白名单派生（`runstate.MANIFEST_JOB_KEYS`），协议不受影响
 - **交付表.xlsx 列**：图片文件名 | 主场景 | 细分场景 | 尺寸 | 文案序号 | 角度 | 标题 Headline | 主文案 Primary Text | 生图提示词
 - **LLM 三个环节的 JSON 返回结构**：见 `core/prompts.py` 各模板内的格式约定（`scenes[] / image_prompt / copies[]`）
 
@@ -56,6 +56,7 @@
 - [x] 四处持续对话修改：场景 / 生图提示词 / 图片（原图基础上重绘，可回退上一版）/ 文案，入参 = 当前结果 + 修改意见 + 历史意见
 - [x] 生图并发：独立图全部并行提交、不设并发上限（限流交给 API 侧 + 重试退避），派生图依赖母版串行
 - [x] 图生图：上传产品参考图走 `images.edit`
+- [x] 海报风格参考图 + 品牌 Logo：Step0 三个上传位（产品图/风格图/Logo），按任务落盘（`refs/`、`refs_style/`、`refs_logo/`）；生图时按「产品→风格→Logo」固定顺序传参考图，并在发送瞬间追加参考图身份英文说明（要求原样放 Logo、贴近风格图气质），job.image_prompt 本身不变
 - [x] 单张图重新生成
 - [x] 6 套提示词在线编辑/恢复默认（管理页按 主流程/分支功能 分组）
 - [x] key 环境变量方案 + 设置页不落盘 key
@@ -92,7 +93,7 @@
 12. **任务状态的权威数据是 state.json**：manifest.json 由它按白名单派生（协议不变），所有 state 写入必须走 `runstate.persist()/update()`（每 run 进程内锁），UI 与后台线程共用这把锁。**本任务后台运行期间 UI 不得 persist**（`persist()` 内已有 `bg.is_running` 守卫，不要绕过），否则会用旧内存副本覆盖后台结果。
 13. **后台任务模型**：`core/tasks.py` 模块级单例线程池（页面重跑不重建）；线程入参在主线程取好、线程内零 session_state；每 run 同时只跑一个后台任务（重复提交被拒绝）；UI 在任务运行时锁定该任务编辑区（`st.fragment(run_every=2s)` 轮询 + `st.stop()`），完成后从盘重载 state 收割。「后台」= 不阻塞页面、可切任务，Streamlit 进程关闭则任务终止（已完成子项已落盘）。
 14. **场景库（scene_lib 表）**：场景挖掘/对话修改成功后自动 upsert（唯一键 产品+主场景+细分场景），重复入库更新内容但**保留 has_image / in_ads 标签**；`has_image` 由前台 `_apply_new_image_ss` 和后台 `tasks._apply_image` 两条出图路径自动打标（按 产品+主/细分场景名匹配，失败只记日志）；`excluded_scenes` 按产品信息**全等匹配**取库内场景名（产品文案改字则匹配不到，已知取舍）。场景行新增 `detail` 字段存 9 字段完整结构（state.json 内部格式，非 manifest 协议）；老场景无 detail/分数，按分数筛选时会被过滤。
-15. **生图提示词链路（V3，2026-08-28 定稿）**：场景变量 →（`tasks._prompt_vars` 组装，老场景逐项回退 description/headline_angle）→ `image_prompt_gen` 元提示词 → Claude 产出英文海报提示词（广告文字原文引用）→ 生图模型**原样接收**（无风格外壳，`image_style_template` 已删除）。历史沿革：V1=LLM 生成+风格外壳；V2=模板直连无 LLM（当天被 V3 取代）。海报含文字（标题/CTA），生图模型渲染文字可能出现拼写错误，属模型能力边界。
+15. **生图提示词链路（V3，2026-08-28 定稿）**：场景变量 →（`tasks._prompt_vars` 组装，老场景逐项回退 description/headline_angle）→ `image_prompt_gen` 元提示词 → Claude 产出英文海报提示词（广告文字原文引用）→ 生图模型**原样接收**（无风格外壳，`image_style_template` 已删除）。历史沿革：V1=LLM 生成+风格外壳；V2=模板直连无 LLM（当天被 V3 取代）。海报含文字（标题/CTA），生图模型渲染文字可能出现拼写错误，属模型能力边界。**例外（2026-08-28 经确认）**：任务带风格参考图或 Logo 时，`tasks._ref_bundle` 会在发送瞬间在提示词末尾追加一段参考图身份英文说明（不追加模型无法区分多张参考图各是什么）；只有产品参考图或无参考图时仍严格原样直发，job.image_prompt 任何情况下不被改写。Logo 由生图模型**重绘还原**而非像素级贴图，复杂小字 Logo 可能有细节偏差。
 16. **SQLite 是索引层，manifest.json 仍是权威数据**：`data/app.db`（已 gitignore）由 `store.save_manifest()` 双写产生，任何时候可用 `db.rebuild_from_outputs()` 从 outputs/ 全量重建（幂等：按 dir_name upsert run、整删整插 jobs）。入库失败**不得中断素材生产**（`sync_run_safe` 吞异常返回错误串）。改 db schema 无迁移负担——直接删库重建。若 /mnt/c 上 SQLite 出现锁异常/变慢，把 `DB_PATH` 迁到 WSL 原生盘。
 
 ## 协作规范（Claude 必须遵守）
@@ -138,3 +139,4 @@
 - 2026-08-28：日志系统——新增 `core/logger.py`（logs/app.log 按天滚动 14 天），llm/imagen/tasks/db/runstate 追加式埋点，不改任何逻辑。
 - 2026-08-27：多任务工作台 + 后台任务（决策 12/13）——新增 `core/runstate.py`（state.json）、`core/tasks.py`（后台三管线）；workflow.py 改造为任务制（侧边栏切换、后台运行时锁定轮询）；历史页支持载入老 run 继续编辑；协议新增 state.json（manifest 协议不变）。
 - 2026-08-28：Step1 场景挖掘取消内部分数淘汰——scene_mining 模板改为候选去重评分后全部输出（同步更新 prompts.json 已保存模板），Step1 结果区新增筛选器（主场景多选 + 最低综合评分滑条，仅影响展示）。返回结构与各协议不变。
+- 2026-08-28：海报风格参考图 + 品牌 Logo（决策 15 例外条款）——Step0 新增风格图/Logo 上传位，state.json 经确认新增 `style_images`/`logo_images` 两个 key；生图时按固定顺序传参考图并追加身份说明（`tasks._ref_bundle`），仅产品图时行为不变。

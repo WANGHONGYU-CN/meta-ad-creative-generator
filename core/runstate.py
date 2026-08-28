@@ -20,6 +20,8 @@ log = get_logger("runstate")
 
 STATE_NAME = "state.json"
 REFS_DIRNAME = "refs"
+STYLE_REFS_DIRNAME = "refs_style"  # 海报风格参考图
+LOGO_REFS_DIRNAME = "refs_logo"    # 品牌 Logo 图
 PREV_DIRNAME = ".prev"  # images/.prev/<filename> 存「回退上一版」的旧图
 
 # manifest 协议字段白名单（不得增删，见 CLAUDE.md）
@@ -50,6 +52,8 @@ def default_state() -> dict:
         "jobs": [],
         "jobs_gen": 0,
         "ref_images": [],
+        "style_images": [],
+        "logo_images": [],
         "chats": {},
     }
 
@@ -157,9 +161,11 @@ def list_task_dirs() -> list:
 
 
 # ---------------------------------------------------------------- 参考图 / 回退图文件
-def save_ref_images(run_dir: Path, files: list) -> list:
-    """把上传的产品参考图存到 run 目录 refs/（整目录覆盖），返回相对路径列表。"""
-    refs_dir = Path(run_dir) / REFS_DIRNAME
+def save_ref_images(run_dir: Path, files: list, dirname: str = REFS_DIRNAME) -> list:
+    """把上传的参考图存到 run 目录 dirname/（整目录覆盖），返回相对路径列表。
+
+    dirname：REFS_DIRNAME=产品参考图，STYLE_REFS_DIRNAME=风格参考图，LOGO_REFS_DIRNAME=Logo。"""
+    refs_dir = Path(run_dir) / dirname
     refs_dir.mkdir(parents=True, exist_ok=True)
     for old in refs_dir.iterdir():
         if old.is_file():
@@ -168,7 +174,7 @@ def save_ref_images(run_dir: Path, files: list) -> list:
     for idx, (name, data) in enumerate(files):
         safe = f"{idx}_{Path(name).name}"[:60]
         (refs_dir / safe).write_bytes(data)
-        rels.append(f"{REFS_DIRNAME}/{safe}")
+        rels.append(f"{dirname}/{safe}")
     return rels
 
 
