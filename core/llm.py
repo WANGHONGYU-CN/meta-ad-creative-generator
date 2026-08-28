@@ -57,11 +57,15 @@ def call_json(config: dict, prompt_text: str, images: list | None = None) -> dic
     model = config["claude_model"]
     t0 = time.monotonic()
     try:
-        response = client.messages.create(
+        # 场景挖掘全量输出候选后回复可达 2 万+ 字符，16000 会被截断（2026-08-28 实测）。
+        # max_tokens=32000 时 SDK 强制要求流式（请求可能超 10 分钟），
+        # 用 stream 收完拿最终 Message，返回结构与 create 相同。
+        with client.messages.stream(
             model=model,
-            max_tokens=16000,
+            max_tokens=32000,
             messages=[{"role": "user", "content": content}],
-        )
+        ) as stream:
+            response = stream.get_final_message()
     except Exception as e:
         log.error("Claude 调用失败 model=%s images=%d 耗时=%.1fs: %r",
                   model, len(images or []), time.monotonic() - t0, e)
@@ -74,10 +78,16 @@ def call_json(config: dict, prompt_text: str, images: list | None = None) -> dic
         raise RuntimeError(f"模型拒绝了本次请求{detail}")
 
     text = "".join(b.text for b in response.content if b.type == "text")
+    if response.stop_reason == "max_tokens":
+        log.error("Claude 回复被输出上限截断 model=%s 回复长度=%d", model, len(text))
+        raise RuntimeError(
+            "模型回复超长，被输出上限截断（JSON 不完整）。请重试，或减少要求输出的内容量。"
+        )
     try:
         parsed = _extract_json(text)
     except (ValueError, json.JSONDecodeError) as e:
-        log.error("Claude 回复 JSON 解析失败 model=%s: %s", model, e)
+        log.error("Claude 回复 JSON 解析失败 model=%s stop=%s 回复长度=%d: %s",
+                  model, response.stop_reason, len(text), e)
         raise
     log.info("Claude 调用成功 model=%s images=%d 耗时=%.1fs stop=%s",
              model, len(images or []), time.monotonic() - t0, response.stop_reason)

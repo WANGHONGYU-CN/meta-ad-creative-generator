@@ -84,7 +84,7 @@
 3. **提示词模板渲染**：用逐变量 `str.replace`，不用 `str.format`——模板里含 JSON 示例花括号。
 4. **key 管理**：环境变量优先（`load_config(env_fallback=True)`），设置页读写原始 config.json（`env_fallback=False`），避免 env key 落盘。
 5. **页面目录叫 `pages_`**（带下划线）：避免触发 Streamlit 旧版自动多页机制，导航由 `st.navigation` 显式声明。
-6. **LLM JSON 输出**：靠提示词约定 + `_extract_json()` 容错解析（剥代码围栏/前后杂文），未用 structured outputs（需兼容中转站）。
+6. **LLM JSON 输出**：靠提示词约定 + `_extract_json()` 容错解析（剥代码围栏/前后杂文），未用 structured outputs（需兼容中转站）。`call_json` 用 `max_tokens=32000` + **流式收取**（SDK 对超 10 分钟的非流式请求直接报错；场景全量输出后回复可达 2 万+ 字符，16000 曾被截断成 JSON 解析错误）；`stop_reason == "max_tokens"` 时报明确的「回复被截断」错误。中转站流式已实测可用。
 7. **依赖版本**：anthropic 1.x（基于 httpx2）、openai 3.x、streamlit 1.62。venv 用 `--without-pip` + get-pip.py 创建（WSL 无 python3-venv 包且无 sudo）。
 8. **venv 必须放 WSL 原生磁盘**（`~/venvs/meta-creative-tool`），不能放项目目录：项目在 /mnt/c（9p 文件系统），venv 放那里冷启动 import 需 35 秒+，WSL 侧仅 1 秒。同理 `.streamlit/config.toml` 设了 `fileWatcherType = "none"`。**不要把 venv 建回项目目录**。
 9. **双尺寸 = 母版派生而非独立双生成**：4:5 为母版，1:1 用 `ratio_adapt` 提示词 + `imagen.edit_image()`（输入为母版成品图）改尺寸得到，保证两个尺寸内容一致。job 的 `derived_from` 字段记录母版文件名；母版图变化时派生图必须失效。注意 `images.edit` 是重绘，内容"高度一致"而非像素级一致。
@@ -140,3 +140,4 @@
 - 2026-08-27：多任务工作台 + 后台任务（决策 12/13）——新增 `core/runstate.py`（state.json）、`core/tasks.py`（后台三管线）；workflow.py 改造为任务制（侧边栏切换、后台运行时锁定轮询）；历史页支持载入老 run 继续编辑；协议新增 state.json（manifest 协议不变）。
 - 2026-08-28：Step1 场景挖掘取消内部分数淘汰——scene_mining 模板改为候选去重评分后全部输出（同步更新 prompts.json 已保存模板），Step1 结果区新增筛选器（主场景多选 + 最低综合评分滑条，仅影响展示）。返回结构与各协议不变。
 - 2026-08-28：海报风格参考图 + 品牌 Logo（决策 15 例外条款）——Step0 新增风格图/Logo 上传位，state.json 经确认新增 `style_images`/`logo_images` 两个 key；生图时按固定顺序传参考图并追加身份说明（`tasks._ref_bundle`），仅产品图时行为不变。
+- 2026-08-28：修复场景挖掘 JSON 截断报错（决策 6 补充）——场景全量输出后回复超过 `max_tokens=16000` 被截断，报「Expecting ',' delimiter」；`call_json` 上限提至 32000 并改流式收取，截断时报明确错误，解析失败日志补记 stop_reason/回复长度。
