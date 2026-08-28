@@ -2,8 +2,13 @@
 import base64
 import json
 import re
+import time
 
 import anthropic
+
+from core.logger import get_logger
+
+log = get_logger("llm")
 
 
 def get_client(config: dict) -> anthropic.Anthropic:
@@ -49,19 +54,34 @@ def call_json(config: dict, prompt_text: str, images: list | None = None) -> dic
         )
     content.append({"type": "text", "text": prompt_text})
 
-    response = client.messages.create(
-        model=config["claude_model"],
-        max_tokens=16000,
-        messages=[{"role": "user", "content": content}],
-    )
+    model = config["claude_model"]
+    t0 = time.monotonic()
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=16000,
+            messages=[{"role": "user", "content": content}],
+        )
+    except Exception as e:
+        log.error("Claude 调用失败 model=%s images=%d 耗时=%.1fs: %r",
+                  model, len(images or []), time.monotonic() - t0, e)
+        raise
     if response.stop_reason == "refusal":
         detail = ""
         if response.stop_details and response.stop_details.explanation:
             detail = f"：{response.stop_details.explanation}"
+        log.warning("Claude 拒绝请求 model=%s%s", model, detail)
         raise RuntimeError(f"模型拒绝了本次请求{detail}")
 
     text = "".join(b.text for b in response.content if b.type == "text")
-    return _extract_json(text)
+    try:
+        parsed = _extract_json(text)
+    except (ValueError, json.JSONDecodeError) as e:
+        log.error("Claude 回复 JSON 解析失败 model=%s: %s", model, e)
+        raise
+    log.info("Claude 调用成功 model=%s images=%d 耗时=%.1fs stop=%s",
+             model, len(images or []), time.monotonic() - t0, response.stop_reason)
+    return parsed
 
 
 def list_models(config: dict) -> list:

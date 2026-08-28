@@ -1,5 +1,7 @@
 .venv/
 config.json
 outputs/
+data/
+logs/
 __pycache__/
 *.pyc

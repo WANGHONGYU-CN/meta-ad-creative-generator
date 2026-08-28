@@ -6,6 +6,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
+from core import db
 from core.config import OUTPUTS_DIR
 
 
@@ -31,10 +32,12 @@ def save_image(run_dir: Path, filename: str, png_bytes: bytes) -> Path:
     return path
 
 
-def save_manifest(run_dir: Path, manifest: dict) -> None:
+def save_manifest(run_dir: Path, manifest: dict) -> str:
+    """落盘 manifest.json（权威数据），并同步写 SQLite 索引（失败不中断，返回错误信息）。"""
     (run_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    return db.sync_run_safe(run_dir, manifest)
 
 
 def export_xlsx(run_dir: Path, jobs: list) -> Path:

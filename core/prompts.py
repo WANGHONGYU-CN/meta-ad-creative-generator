@@ -1,4 +1,4 @@
-"""7 套提示词模板的默认值、读写与变量渲染。
+"""6 套提示词模板的默认值、读写与变量渲染。
 
 模板中的变量写作 {variable_name}，渲染时逐个字符串替换（不用 str.format，
 这样模板里可以放 JSON 示例的花括号而不需要转义）。
@@ -12,26 +12,204 @@ PROMPTS_PATH = PROJECT_ROOT / "prompts.json"
 DEFAULT_PROMPTS = {
     "scene_mining": {
         "name": "① 场景挖掘",
-        "description": "根据产品信息挖掘主场景和细分场景",
-        "variables": ["product_info"],
-        "template": """你是一位资深的 Meta（Facebook/Instagram）广告投放策略专家，擅长为产品挖掘高转化的广告投放场景。
+        "description": "根据产品信息+排除场景列表，挖掘带评分的主/细分场景（9 字段结构）",
+        "variables": ["product_info", "excluded_scenes"],
+        "template": """你是一位资深的 Meta（Facebook / Instagram）效果广告策略专家，擅长从产品能力、目标人群、触发时刻和购买动机中，挖掘可以直接用于广告创意测试的高转化场景。
+你必须全网搜索这个应用的使用场景和细分场景
 
-产品信息：
+## 产品信息
+
 {product_info}
 
-请基于这个产品，挖掘适合 Meta 信息流广告的使用/营销场景。要求：
-1. 输出 3-5 个主场景（如：家庭日常、户外运动、职场通勤、节日送礼等，结合产品实际来定）
-2. 每个主场景下给出 2-4 个具体的细分场景，细分场景要具体到可以直接画出一张广告图的程度
-3. 场景要贴近目标用户的真实生活痛点或渴望，有代入感，利于点击和转化
+## 已使用或需要排除的场景
 
-严格按以下 JSON 格式输出，不要输出 JSON 以外的任何内容：
+{excluded_scenes}
+
+如果没有需要排除的场景，`excluded_scenes` 传入空数组 `[]`。
+
+## 任务目标
+
+为该产品挖掘适合 Meta 信息流广告测试的高转化场景。
+
+请先在内部生成不少于 30 个候选细分场景，完成去重、分类和评分后，只输出最终入选结果。不要输出候选池、分析过程或淘汰结果。
+
+## 一、主场景定义
+
+输出 3-5 个主场景。
+
+主场景必须代表一种独立、明确的用户需求、购买动机或使用目的，例如：
+
+- 婚礼全周期
+- 宠物成长与陪伴
+- 创作者内容生产
+- 品牌与产品推广
+- 家庭成长记录
+- 生日与个性化礼物
+
+主场景不能只是地点、时间、渠道、受众标签或空泛情绪。
+
+禁止使用以下类型的主场景名称：
+
+- 日常生活
+- 室内场景
+- 户外场景
+- 年轻人
+- 社交媒体
+- 情感共鸣
+- 其他场景
+- 综合场景
+
+不同主场景之间必须有明显差异，不能只是换一种说法。
+
+## 二、细分场景定义
+
+每个主场景输出 2-4 个细分场景。
+
+每个细分场景必须同时包含：
+
+1. 明确的目标用户
+2. 明确的触发时刻或具体事件
+3. 明确的痛点、渴望或购买动机
+4. 明确说明用户如何使用产品
+5. 明确说明产品最终生成或带来的结果
+6. 可以直接画成一张广告海报的具体画面
+
+细分场景必须是一个单一、具体的任务，不能把多个场景合并在一起。
+
+不合格示例：
+
+- 制作家庭视频
+- 记录美好生活
+- 宠物陪伴
+- 创作者制作内容
+- 企业进行宣传
+- 把照片变成视频
+
+合格示例：
+
+- 把宠物领养第一天的照片和歌曲做成成长纪念视频
+- 把普通白底产品照变成带有电影镜头的新品广告片
+- 把宝宝第一次走路的手机照片做成家庭纪念短片
+- 把婚礼誓言、合照和音乐做成婚宴现场播放影片
+- 把摄影师的静态作品集做成带音乐的展览预告片
+
+## 三、产品相关性要求
+
+只能使用产品信息中明确存在的功能，不得虚构功能、价格、速度、模板、版权能力或输出规格。
+
+每个细分场景都必须明确体现以下链路：
+
+“用户拥有什么素材或问题 → 如何使用产品 → 得到什么结果 → 结果用于什么目的”
+
+如果产品属于图片、音乐或视频生成类产品，还必须在 `product_use` 和 `visual_brief` 中明确表现：
+
+“输入照片、图片、音乐或其他素材 → 生成视频成片”
+
+不能只描述人物和环境，却看不出产品能做什么。
+
+## 四、广告画面要求
+
+每个细分场景必须能被独立制作成一张 Meta 广告海报。
+
+`visual_brief` 必须具体说明：
+
+- 主要人物、产品或物体
+- 发生地点
+- 输入素材是什么
+- 生成的视频结果是什么
+- 如何在一张图中直观表现“输入 → 转换 → 输出”
+- 哪个元素是第一视觉焦点
+
+优先采用以下容易理解的视觉结构：
+
+- 原始照片 → 箭头或音乐波形 → 三个电影视频帧
+- 普通素材与生成成片的左右对比
+- 用户手持手机查看生成的视频
+- 一张照片展开为多个连续电影镜头
+- 照片、歌曲和视频时间线组合
+
+不要只输出抽象概念、纯氛围描写或无法直接出图的故事。
+
+## 五、转化价值评分
+
+为每个细分场景进行 100 分制评分：
+
+- `product_fit`：产品匹配度，0-30 分
+- `visual_clarity`：广告画面直观度，0-25 分
+- `purchase_intent`：付费或行动意愿，0-20 分
+- `attention_emotion`：停留与情绪吸引力，0-15 分
+- `meta_safety`：Meta 投放安全性，0-10 分
+
+`total_score` 必须等于以上五项之和。
+
+只允许输出 `total_score >= 90` 的细分场景。
+
+不得为了凑数虚高打分。如果某个主场景下不足两个 90 分以上的细分场景，则删除该主场景，换成其他更适合的主场景。
+
+## 六、去重与分布要求
+
+- 不得输出与 `excluded_scenes` 相同或高度近似的场景
+- 同一主场景下的细分场景必须对应不同触发时刻或不同购买动机
+- 不得只替换人物年龄、性别、地点或节日后当成新场景
+- 不得让所有场景集中在同一种内容类型
+- 优先覆盖不同人群、不同事件和不同商业目的
+- 每个细分场景只能归入一个最匹配的主场景
+
+## 七、Meta 合规要求
+
+避免：
+
+- 暗示用户具有敏感个人属性
+- 制造羞辱、恐惧或过度焦虑
+- 未经证实的效果承诺
+- 公众人物、明星脸或受版权保护的角色
+- 不适合广告投放的医疗、死亡或创伤画面
+- 容易误导为真实客户案例的表达
+
+## 八、海报文案要求
+
+`headline`、`subheadline`、`cta` 是直接印在广告海报上的最终文案：
+
+- 语言与产品目标市场一致（如目标欧美用户则用英文）
+- headline 醒目有钩子；subheadline 简短补充；cta 是行动指令（如 Try Free / 立即体验）
+- `selling_point` 只能来自产品信息中明确存在的能力
+
+## 输出要求
+
+严格输出合法 JSON，不得输出 Markdown、解释、前言、结尾或 JSON 之外的任何文字。
+
+JSON 中不得出现注释、尾随逗号、NaN 或无法解析的内容。
+
+输出结构：
+
 {
   "scenes": [
     {
       "main_scene": "主场景名称",
-      "description": "该主场景的一句话说明（为什么适合投放）",
+      "description": "该主场景对应的核心需求、购买动机，以及为什么适合 Meta 广告投放",
       "sub_scenes": [
-        {"name": "细分场景名称", "description": "具体画面的一句话描述"}
+        {
+          "name": "具体且可直接用于文件命名的细分场景名称",
+          "audience": "该场景的核心目标用户",
+          "trigger": "触发用户使用产品的具体时刻或事件",
+          "pain_or_desire": "用户当前最强烈的痛点或渴望",
+          "product_use": "用户提供什么素材，使用产品做什么，最终获得什么结果",
+          "video_purpose": "生成结果最终用于什么目的",
+          "visual_brief": "可以直接交给生图模型的广告画面描述，明确表现输入素材到视频成片的转换",
+          "headline_angle": "适合广告大标题的短句方向，不超过12个英文单词或20个中文字符",
+          "selling_point": "该场景下最能打动用户的核心卖点，必须来自产品信息，不得虚构",
+          "headline": "海报主标题：可直接印在海报上的最终文案，醒目有钩子，不超过12个英文单词或20个中文字符",
+          "subheadline": "海报副标题：一句话补充卖点或场景",
+          "cta": "海报 CTA 按钮文案，2-4 个词",
+          "score_breakdown": {
+            "product_fit": 0,
+            "visual_clarity": 0,
+            "purchase_intent": 0,
+            "attention_emotion": 0,
+            "meta_safety": 0
+          },
+          "total_score": 0
+        }
       ]
     }
   ]
@@ -39,36 +217,39 @@ DEFAULT_PROMPTS = {
     },
     "image_prompt_gen": {
         "name": "② 生图提示词生成",
-        "description": "根据主场景+细分场景生成生图提示词",
-        "variables": ["product_info", "main_scene", "sub_scene", "sub_scene_desc", "ratio"],
-        "template": """你是一位专业的 AI 生图提示词工程师，服务于 Meta 广告素材团队。请根据下面的信息，写一条用于 AI 生图的英文提示词。
+        "description": "根据场景挖掘输出的全部变量（目标用户/卖点/画面 brief/广告文字），让 Claude 写出含广告语的海报生图提示词",
+        "variables": ["product_info", "main_scene", "sub_scene", "audience", "selling_point", "visual_brief", "aspect_ratio", "headline", "subheadline", "cta"],
+        "template": """你是一名资深商业广告视觉总监 + AI 生图提示词工程师，服务于 Meta 投放团队。请根据下面的场景信息，为一款 App 写一条可直接发给 AI 生图模型的高转化广告海报提示词。
 
 产品信息：
 {product_info}
 
 主场景：{main_scene}
-细分场景：{sub_scene}（{sub_scene_desc}）
-图片比例：{ratio}
+细分场景：{sub_scene}
+目标用户：{audience}
+核心卖点：{selling_point}
+画面建议：{visual_brief}
+图片比例：{aspect_ratio}
 
-要求：
-1. 提示词用英文撰写，描述一张真实感强的商业广告摄影图
-2. 明确写出：场景环境、人物（如需要）、产品在画面中的位置与使用方式、光线氛围、镜头视角
-3. 构图要针对 {ratio} 比例优化（1:1 方图居中构图突出主体；4:5 竖图利用纵向空间，主体偏中上，适合手机信息流）
-4. 产品必须是画面的视觉焦点之一，且与上传的产品参考图保持一致
-5. 画面中不要出现任何文字、水印、logo 贴片
+海报广告文字（必须写进提示词并要求生图模型渲染到画面上）：
+- 标题："{headline}"
+- 副标题："{subheadline}"
+- CTA 按钮："{cta}"
+
+写提示词的要求：
+
+1. 提示词主体用英文撰写（生图模型对英文理解更好），但上方三条广告文字必须**原文精确引用**（加引号写进提示词），不得改写、翻译或增删。
+2. 画面必须让用户一眼看懂：这个场景发生了什么、产品做了什么、用户得到了什么。若产品具有生成/转换/处理能力，用「原始素材 → 产品处理 → 最终成果」的直观结构表现（例如：一张照片 + 音乐波形 → 三个电影画面帧）；其他产品则表现「用户问题 → 使用产品 → 获得结果」。
+3. 只保留一个视觉焦点和一个核心卖点；根据场景自动选择合适风格（真实生活 / 电影感 / 温馨 / 时尚 / 高燃 / 专业商务等），不要所有海报都是同一种模板或统一科技风。
+4. 明确描述：主体人物或物体、发生环境、光线氛围、镜头视角、构图布局；按 {aspect_ratio} 比例原生构图，所有重要内容保留安全边距。
+5. 把文字排版要求写进提示词：标题大而醒目（移动端清晰可读），副标题小一号，CTA 是一个不抢眼的小按钮；除指定广告文字外，画面不得出现其他文字、乱码、水印或 logo 贴片。
+6. 人物五官、手指、产品形态必须自然真实、前后一致；禁止杂乱拼贴、多个视觉中心、虚假的复杂软件界面、飞散照片、廉价粒子和过度光效。
+7. 不得虚构产品信息中不存在的功能、价格、速度或效果承诺。
 
 严格按以下 JSON 格式输出，不要输出 JSON 以外的任何内容：
 {
-  "image_prompt": "英文生图提示词"
+  "image_prompt": "最终海报提示词（英文为主，广告文字原文引用）"
 }""",
-    },
-    "image_style_template": {
-        "name": "③ 生图风格模板",
-        "description": "拼接在每条生图提示词外层的固定风格/质量要求（直接发给生图模型）",
-        "variables": ["image_prompt"],
-        "template": """{image_prompt}
-
-Style: photorealistic commercial advertising photography, natural soft lighting, high detail, realistic skin and material textures, shallow depth of field, shot on a professional full-frame camera. The product must look exactly like the reference product image provided. Absolutely no text, no letters, no watermark, no logo overlays, no borders in the image.""",
     },
     "copywriting": {
         "name": "④ 看图写文案",
@@ -95,13 +276,13 @@ Style: photorealistic commercial advertising photography, natural soft lighting,
 }""",
     },
     "ratio_adapt": {
-        "name": "⑤ 尺寸改版",
+        "name": "分支 · 尺寸改版",
         "description": "双尺寸时把 4:5 母版图改成其他比例（直接发给生图模型，内容保持不变）",
         "variables": ["target_ratio"],
         "template": """Recompose this exact image into a {target_ratio} aspect ratio while keeping the content identical: the same subject, the same product, the same people, the same background, the same lighting, colors and style. Do not add or remove any elements. Only adjust the framing and composition so the scene fits the {target_ratio} format naturally. Absolutely no text, no letters, no watermark, no logo overlays, no borders in the image.""",
     },
     "refine_text": {
-        "name": "⑥ 结果修改（对话）",
+        "name": "分支 · 结果修改（对话）",
         "description": "各环节文字结果（场景/提示词/文案）按用户修改意见迭代修订",
         "variables": ["task_context", "current_output", "history", "feedback"],
         "template": """你是 Meta 广告素材工作流中的修改助手。用户对某一步的 AI 产出不满意，请根据用户的修改意见修订结果。
@@ -126,7 +307,7 @@ Style: photorealistic commercial advertising photography, natural soft lighting,
 }""",
     },
     "image_refine": {
-        "name": "⑦ 图片修改（对话）",
+        "name": "分支 · 图片修改（对话）",
         "description": "按用户修改意见在原图基础上编辑图片（直接发给生图模型）",
         "variables": ["feedback"],
         "template": """Edit this image according to the following instruction, while keeping everything else (subject, product, composition, lighting, style, colors) unchanged. The instruction may be written in Chinese:

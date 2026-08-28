@@ -10,6 +10,10 @@ import time
 from openai import OpenAI
 from PIL import Image
 
+from core.logger import get_logger
+
+log = get_logger("imagen")
+
 # 比例 -> (API 请求尺寸, 裁切目标尺寸或 None)
 RATIO_SPECS = {
     "1:1": ("1024x1024", None),
@@ -53,6 +57,8 @@ def generate_image(
     size, crop_target = RATIO_SPECS[ratio]
     client = get_client(config)
 
+    mode = "图生图" if reference_images else "文生图"
+    t0 = time.monotonic()
     last_error = None
     for attempt in range(retries + 1):
         try:
@@ -74,11 +80,17 @@ def generate_image(
             png_bytes = base64.b64decode(result.data[0].b64_json)
             if crop_target:
                 png_bytes = _center_crop(png_bytes, crop_target)
+            log.info("%s成功 model=%s ratio=%s 耗时=%.1fs 重试=%d",
+                     mode, config["image_model"], ratio, time.monotonic() - t0, attempt)
             return png_bytes
         except Exception as e:  # noqa: BLE001 - 统一重试后上抛
             last_error = e
             if attempt < retries:
+                log.warning("%s失败将重试 attempt=%d/%d model=%s ratio=%s: %r",
+                            mode, attempt + 1, retries, config["image_model"], ratio, e)
                 time.sleep(3 * (attempt + 1))
+    log.error("%s最终失败 model=%s ratio=%s 耗时=%.1fs: %r",
+              mode, config["image_model"], ratio, time.monotonic() - t0, last_error)
     raise last_error
 
 
@@ -99,6 +111,7 @@ def edit_image(
     size, crop_target = RATIO_SPECS[ratio]
     client = get_client(config)
 
+    t0 = time.monotonic()
     last_error = None
     for attempt in range(retries + 1):
         try:
@@ -111,11 +124,17 @@ def edit_image(
             png_bytes = base64.b64decode(result.data[0].b64_json)
             if crop_target:
                 png_bytes = _center_crop(png_bytes, crop_target)
+            log.info("成品图编辑成功 model=%s ratio=%s 耗时=%.1fs 重试=%d",
+                     config["image_model"], ratio, time.monotonic() - t0, attempt)
             return png_bytes
         except Exception as e:  # noqa: BLE001 - 统一重试后上抛
             last_error = e
             if attempt < retries:
+                log.warning("成品图编辑失败将重试 attempt=%d/%d model=%s ratio=%s: %r",
+                            attempt + 1, retries, config["image_model"], ratio, e)
                 time.sleep(3 * (attempt + 1))
+    log.error("成品图编辑最终失败 model=%s ratio=%s 耗时=%.1fs: %r",
+              config["image_model"], ratio, time.monotonic() - t0, last_error)
     raise last_error
 
 
