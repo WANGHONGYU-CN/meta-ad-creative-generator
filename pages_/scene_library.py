@@ -42,7 +42,7 @@ if not rows:
     st.info("没有符合条件的场景。场景在「素材工作流」Step 1 挖掘成功后会自动入库。")
     st.stop()
 
-st.caption(f"共 {len(rows)} 个场景。勾选后可在底部删除或创建生图任务；「投放中」勾选即保存。")
+st.caption(f"共 {len(rows)} 个场景。勾选后用**左侧边栏**的按钮 创建生图任务/删除（页面底部也有一份）；「投放中」勾选即保存。")
 
 
 def _detail_dict(row: dict) -> dict:
@@ -50,6 +50,76 @@ def _detail_dict(row: dict) -> dict:
         return json.loads(row["detail"]) if row["detail"] else {}
     except json.JSONDecodeError:
         return {}
+
+
+# ---------------------------------------------------------------- 操作（侧边栏常驻一份 + 页面底部一份）
+# 勾选状态存 session_state（pick_*），点选即重跑，此处读到的始终是最新值
+picked = [r for r in rows if st.session_state.get(f"pick_{r['id']}")]
+
+
+def _delete_picked():
+    db.delete_scene_lib([r["id"] for r in picked])
+    for r in picked:
+        st.session_state.pop(f"pick_{r['id']}", None)
+    st.toast(f"已删除 {len(picked)} 个场景（只删库记录，不影响历史任务文件）")
+    st.rerun()
+
+
+def _create_gen_task() -> str:
+    """用选中场景新建独立生图任务并跳转工作流；返回错误信息（成功直接跳页）。"""
+    picked_products = {r["product_info"] for r in picked}
+    if len(picked_products) > 1:
+        return "所选场景属于不同产品，请只勾选同一产品的场景。"
+    scenes = []
+    for r in picked:
+        row = {
+            "main_scene": r["main_scene"],
+            "sub_scene": r["sub_scene"],
+            "description": r["description"],
+        }
+        d = _detail_dict(r)
+        if d:
+            row["detail"] = d
+        scenes.append(row)
+    product_info = picked_products.pop()
+    run_dir = store.create_run_dir(product_info[:20] or "场景库任务")
+    state = runstate.default_state()
+    state.update(
+        {
+            "product_info": product_info,
+            "scenes": scenes,
+            "selected_scenes": list(range(len(scenes))),
+            "jobs_gen": 0,
+        }
+    )
+    runstate.persist(run_dir, state)
+    st.session_state["load_run_request"] = str(run_dir)
+    st.switch_page("pages_/workflow.py")
+    return ""
+
+
+def _action_buttons(where: str):
+    if st.button(
+        f"🎨 用选中的 {len(picked)} 个场景创建生图任务",
+        type="primary", disabled=not picked, key=f"gen_task_{where}", use_container_width=True,
+    ):
+        err = _create_gen_task()
+        if err:
+            st.error(err)
+    if st.button(
+        f"🗑 删除选中的 {len(picked)} 个场景",
+        disabled=not picked, key=f"del_scenes_{where}", use_container_width=True,
+    ):
+        _delete_picked()
+
+
+with st.sidebar:
+    st.subheader(f"✅ 已选 {len(picked)} 个场景")
+    _action_buttons("side")
+    st.caption(
+        "按钮常驻侧边栏，随时可点。创建生图任务 = 新建独立任务并跳到工作流"
+        "（场景已勾好，直接从 Step 2 开始），不影响正在后台跑的任务。"
+    )
 
 
 # ---------------------------------------------------------------- 列表（按主场景分组）
@@ -91,51 +161,11 @@ for main, items in groups.items():
             if r["product_info"]:
                 st.caption("产品：" + r["product_info"][:120] + ("…" if len(r["product_info"]) > 120 else ""))
 
-# ---------------------------------------------------------------- 底部操作
-picked = [r for r in rows if st.session_state.get(f"pick_{r['id']}")]
+# ---------------------------------------------------------------- 底部操作（与侧边栏相同的一份）
 st.divider()
-col_del, col_gen, col_info = st.columns([1.2, 1.8, 3])
-
-with col_del:
-    if st.button(f"🗑 删除选中的 {len(picked)} 个场景", disabled=not picked):
-        db.delete_scene_lib([r["id"] for r in picked])
-        for r in picked:
-            st.session_state.pop(f"pick_{r['id']}", None)
-        st.toast(f"已删除 {len(picked)} 个场景（只删库记录，不影响历史任务文件）")
-        st.rerun()
-
-with col_gen:
-    if st.button(f"🎨 用选中的 {len(picked)} 个场景创建生图任务", type="primary", disabled=not picked):
-        picked_products = {r["product_info"] for r in picked}
-        if len(picked_products) > 1:
-            st.error("所选场景属于不同产品，请只勾选同一产品的场景。")
-        else:
-            scenes = []
-            for r in picked:
-                row = {
-                    "main_scene": r["main_scene"],
-                    "sub_scene": r["sub_scene"],
-                    "description": r["description"],
-                }
-                d = _detail_dict(r)
-                if d:
-                    row["detail"] = d
-                scenes.append(row)
-            product_info = picked_products.pop()
-            run_dir = store.create_run_dir(product_info[:20] or "场景库任务")
-            state = runstate.default_state()
-            state.update(
-                {
-                    "product_info": product_info,
-                    "scenes": scenes,
-                    "selected_scenes": list(range(len(scenes))),
-                    "jobs_gen": 0,
-                }
-            )
-            runstate.persist(run_dir, state)
-            st.session_state["load_run_request"] = str(run_dir)
-            st.switch_page("pages_/workflow.py")
-
+col_ops, col_info = st.columns([1.8, 3])
+with col_ops:
+    _action_buttons("bottom")
 with col_info:
     if picked:
         st.caption("创建生图任务 = 新建一个独立任务并跳转到工作流（场景已选好，直接从 Step 2 开始）；不影响正在后台跑的任务。")
