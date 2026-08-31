@@ -141,3 +141,4 @@
 - 2026-08-28：Step1 场景挖掘取消内部分数淘汰——scene_mining 模板改为候选去重评分后全部输出（同步更新 prompts.json 已保存模板），Step1 结果区新增筛选器（主场景多选 + 最低综合评分滑条，仅影响展示）。返回结构与各协议不变。
 - 2026-08-28：海报风格参考图 + 品牌 Logo（决策 15 例外条款）——Step0 新增风格图/Logo 上传位，state.json 经确认新增 `style_images`/`logo_images` 两个 key；生图时按固定顺序传参考图并追加身份说明（`tasks._ref_bundle`），仅产品图时行为不变。
 - 2026-08-28：修复场景挖掘 JSON 截断报错（决策 6 补充）——场景全量输出后回复超过 `max_tokens=16000` 被截断，报「Expecting ',' delimiter」；`call_json` 上限提至 32000 并改流式收取，截断时报明确错误，解析失败日志补记 stop_reason/回复长度。
+- 2026-08-31：文案环节提速——看图写文案由逐张串行改为全部并行（与生图同策略，`tasks.submit_copywriting`）；发给 Claude 的图片先压成 768px JPEG（新增 `llm.vision_image()`，对话改文案同样生效），原先 3 张图串行发原图 PNG 需 14 分钟。

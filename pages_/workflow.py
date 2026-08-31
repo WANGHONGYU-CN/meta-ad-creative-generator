@@ -766,7 +766,7 @@ def make_copies_feedback(i: int):
             {"copies": job["copies"]},
             f"chat_copies_{g}_{i}",
             feedback,
-            images=[(png, "image/png")] if png else None,
+            images=[llm.vision_image(png)] if png else None,
         )
         if isinstance(new, dict):
             new = new.get("copies", [])

@@ -34,6 +34,27 @@ def _extract_json(text: str) -> dict:
     raise ValueError(f"模型未返回有效 JSON，原始回复：\n{text[:2000]}")
 
 
+def vision_image(data: bytes, max_edge: int = 768) -> tuple:
+    """把要发给 Claude 看的图压成小尺寸 JPEG，返回 (bytes, mime)。
+
+    看图写文案不需要原始分辨率；生图原图 PNG 有几 MB，base64 后经中转站
+    上传是文案环节耗时的大头（2026-08-28 实测单张 3-5 分钟）。压缩失败时
+    原样返回 PNG，不影响主流程。"""
+    try:
+        import io
+
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(data))
+        img.thumbnail((max_edge, max_edge))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        return buf.getvalue(), "image/jpeg"
+    except Exception as e:  # noqa: BLE001 - 压缩只是优化，失败退回原图
+        log.warning("看图压缩失败，退回原图发送: %r", e)
+        return data, "image/png"
+
+
 def call_json(config: dict, prompt_text: str, images: list | None = None) -> dict:
     """调用 Claude 并解析 JSON 回复。
 

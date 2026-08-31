@@ -280,7 +280,9 @@ def submit_image_generation(
 
 
 def submit_copywriting(config, prompts, run_dir, indices, title_count, product_info) -> bool:
-    """Step 4：对已出图的 job 逐张看图写文案。"""
+    """Step 4：对已出图的 job 看图写文案。每张图相互独立，全部并行提交
+    （与生图同策略，决策 11）；图片压缩后再发送（llm.vision_image），
+    原先逐张串行 + 发原图 PNG，3 张图要 14 分钟（2026-08-28 实测）。"""
     tpl = prompts["copywriting"]["template"]
     key = Path(run_dir).name
 
@@ -289,32 +291,42 @@ def submit_copywriting(config, prompts, run_dir, indices, title_count, product_i
         jobs = state.get("jobs", [])
         total = len(indices)
         _set(key, total=total, text="生成文案…")
-        for n, i in enumerate(indices, start=1):
+
+        def one(i):
             job = jobs[i]
-            _set(key, done=n, text=f"文案 {n}/{total}：{job['sub_scene']}（{job['ratio']}）")
-            try:
-                img_path = Path(job.get("image_path", ""))
-                if not job.get("image_path") or not img_path.exists():
-                    raise RuntimeError("图片文件不存在")
-                prompt = render(
-                    tpl,
-                    {
-                        "product_info": product_info,
-                        "main_scene": job["main_scene"],
-                        "sub_scene": job["sub_scene"],
-                        "title_count": int(title_count),
-                    },
-                )
-                result = llm.call_json(config, prompt, images=[(img_path.read_bytes(), "image/png")])
-                copies = result.get("copies", [])
+            img_path = Path(job.get("image_path", ""))
+            if not job.get("image_path") or not img_path.exists():
+                raise RuntimeError("图片文件不存在")
+            prompt = render(
+                tpl,
+                {
+                    "product_info": product_info,
+                    "main_scene": job["main_scene"],
+                    "sub_scene": job["sub_scene"],
+                    "title_count": int(title_count),
+                },
+            )
+            result = llm.call_json(config, prompt, images=[llm.vision_image(img_path.read_bytes())])
+            return result.get("copies", [])
 
-                def mut(state, i=i, copies=copies):
-                    j = state["jobs"][i]
-                    j["copies"] = copies
-                    j["rev"] = j.get("rev", 0) + 1
+        done = 0
+        with ThreadPoolExecutor(max_workers=total) as pool:
+            futures = {pool.submit(one, i): i for i in indices}
+            for fut in as_completed(futures):
+                i = futures[fut]
+                job = jobs[i]
+                done += 1
+                _set(key, done=done, text=f"文案 {done}/{total}：{job['sub_scene']}（{job['ratio']}）")
+                try:
+                    copies = fut.result()
 
-                runstate.update(run_dir, mut)
-            except Exception as e:  # noqa: BLE001
-                _add_error(key, f"「{job['sub_scene']}（{job['ratio']}）」文案生成失败：{e}")
+                    def mut(state, i=i, copies=copies):
+                        j = state["jobs"][i]
+                        j["copies"] = copies
+                        j["rev"] = j.get("rev", 0) + 1
+
+                    runstate.update(run_dir, mut)
+                except Exception as e:  # noqa: BLE001
+                    _add_error(key, f"「{job['sub_scene']}（{job['ratio']}）」文案生成失败：{e}")
 
     return _submit("copies", run_dir, work)
