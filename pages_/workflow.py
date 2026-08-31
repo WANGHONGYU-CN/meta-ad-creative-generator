@@ -35,7 +35,7 @@ ss.setdefault("selected_scenes", [])  # 多选的场景下标列表
 ss.setdefault("jobs", [])             # 每个 job = 一张图（场景 x 尺寸），图片按 image_path 从盘读
 ss.setdefault("jobs_gen", 0)          # job 批次号，用于隔离各批次的 widget/对话状态
 ss.setdefault("run_dir", None)
-ss.setdefault("ref_images", [])       # 已保存的产品参考图相对路径（refs/xxx）
+ss.setdefault("ref_images", [])       # 产品参考图相对路径（refs/xxx）。上传位已于 2026-08-31 移除，仅老任务遗留数据，生图时仍生效
 ss.setdefault("style_images", [])     # 海报风格参考图相对路径（refs_style/xxx）
 ss.setdefault("logo_images", [])      # 品牌 Logo 图相对路径（refs_logo/xxx）
 ss.setdefault("ratio_choice", None)
@@ -103,8 +103,8 @@ def persist():
 def _clear_chat_keys():
     for k in [k for k in list(ss.keys()) if str(k).startswith("chat_")]:
         del ss[k]
-    # 上传指纹跟任务走：切换/新建任务后重置，让上传框里的文件重新存进新任务
-    for k in ("_fp_refs", "_fp_style", "_fp_logo"):
+    # 上传指纹/暂存跟任务走：切换/新建任务后重置，让上传框里的文件重新存进新任务
+    for k in ("_fp_style", "_fp_logo", "_pending_style_images", "_pending_logo_images"):
         ss.pop(k, None)
 
 
@@ -274,42 +274,27 @@ product_info = st.text_area(
     key="product_info",
     placeholder="例：便携颈挂风扇，卖点是超静音/续航18小时/可折叠，目标人群是欧美户外通勤人群，目标市场美国…",
 )
-col_ref, col_style, col_logo = st.columns(3)
-with col_ref:
-    uploaded_refs = st.file_uploader(
-        "产品参考图（建议 1-3 张白底或实拍图，生图时如实还原产品）",
-        type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=True,
-    )
-    if not uploaded_refs and ss.ref_images:
-        st.caption(f"本任务已保存 {len(ss.ref_images)} 张产品参考图，生图时继续使用；重新上传即替换。")
+col_style, col_logo = st.columns(2)
 with col_style:
     uploaded_styles = st.file_uploader(
         "海报风格参考图（可选，1-3 张，生成的海报会贴近其风格/配色/排版气质）",
         type=["png", "jpg", "jpeg", "webp"],
         accept_multiple_files=True,
     )
-    if not uploaded_styles and ss.style_images:
-        st.caption(f"本任务已保存 {len(ss.style_images)} 张风格参考图；重新上传即替换。")
 with col_logo:
     uploaded_logos = st.file_uploader(
         "品牌 Logo（可选，1 张，建议透明底 PNG，会原样放进海报角落）",
         type=["png", "jpg", "jpeg", "webp"],
         accept_multiple_files=False,
     )
-    if not uploaded_logos and ss.logo_images:
-        st.caption("本任务已保存 Logo，生图时继续使用；重新上传即替换。")
 
 
 def _sync_uploads():
-    """上传后立即落盘。后台任务锁页（st.stop）或切页时 Streamlit 会丢弃未渲染
-    组件的状态——file_uploader 里的文件会消失，等到点生图才存就晚了。
+    """上传后立即接管：任务已建则马上落盘；任务未建先暂存进普通 session key
+    （切页不丢），建任务后的下一次重跑自动补落盘。后台任务锁页（st.stop）或
+    切页时 Streamlit 会丢弃 file_uploader 的内容，等到点生图才存就晚了。
     按 文件名+大小 指纹判断是否有新上传，避免每次重跑重复写盘。"""
-    if not ss.run_dir:
-        return  # 任务还没创建，创建后的下一次重跑会自动补存
     groups = (
-        ([(f.name, f.getvalue()) for f in uploaded_refs or []],
-         "ref_images", runstate.REFS_DIRNAME, "_fp_refs"),
         ([(f.name, f.getvalue()) for f in uploaded_styles or []],
          "style_images", runstate.STYLE_REFS_DIRNAME, "_fp_style"),
         ([(uploaded_logos.name, uploaded_logos.getvalue())] if uploaded_logos else [],
@@ -317,19 +302,61 @@ def _sync_uploads():
     )
     changed = False
     for files, attr, dirname, fp_key in groups:
-        if not files:
-            continue
+        pend_key = f"_pending_{attr}"
         fp = [(n, len(b)) for n, b in files]
-        if ss.get(fp_key) == fp:
-            continue
-        ss[attr] = runstate.save_ref_images(ss.run_dir, files, dirname=dirname)
-        ss[fp_key] = fp
-        changed = True
+        if files and ss.get(fp_key) != fp:
+            ss[fp_key] = fp
+            ss[pend_key] = files
+        if ss.run_dir and ss.get(pend_key):
+            ss[attr] = runstate.save_ref_images(ss.run_dir, ss[pend_key], dirname=dirname)
+            ss.pop(pend_key, None)
+            changed = True
     if changed:
         persist()
 
 
 _sync_uploads()
+
+
+def _delete_ref_image(attr: str, rel: str):
+    (Path(ss.run_dir) / rel).unlink(missing_ok=True)
+    ss[attr] = [r for r in ss[attr] if r != rel]
+    persist()
+
+
+def _ref_thumbs(col, attr: str, label: str):
+    """上传框下方的缩略图回显：切页后 file_uploader 本体无法程序回填（平台限制），
+    用缩略图展示当前生效的图，支持单张删除。"""
+    with col:
+        pend = ss.get(f"_pending_{attr}") or []
+        rels = ss.get(attr) or []
+        if pend:
+            st.caption(f"已暂存 {len(pend)} 张{label}（创建任务后自动保存）；重新上传即整组替换。")
+        elif rels:
+            st.caption(f"本任务已保存 {len(rels)} 张{label}，生图时使用；重新上传即整组替换。")
+        else:
+            return
+        tcols = st.columns(3)
+        if pend:
+            for i, (_name, data) in enumerate(pend):
+                with tcols[i % 3]:
+                    st.image(data, use_container_width=True)
+                    if st.button("✕ 删除", key=f"del_pend_{attr}_{i}"):
+                        pend.pop(i)
+                        st.rerun()
+            return
+        for i, rel in enumerate(rels):
+            p = Path(ss.run_dir) / rel
+            with tcols[i % 3]:
+                if p.exists():
+                    st.image(str(p), use_container_width=True)
+                if st.button("✕ 删除", key=f"del_{attr}_{i}"):
+                    _delete_ref_image(attr, rel)
+                    st.rerun()
+
+
+_ref_thumbs(col_style, "style_images", "风格参考图")
+_ref_thumbs(col_logo, "logo_images", "Logo")
 
 col_ratio, col_count = st.columns(2)
 with col_ratio:
@@ -627,10 +654,6 @@ def _apply_new_image_ss(i: int, png: bytes):
 
 
 def _submit_images(master_indices: list, derived_indices: list):
-    if uploaded_refs:
-        ss.ref_images = runstate.save_ref_images(
-            ss.run_dir, [(f.name, f.getvalue()) for f in uploaded_refs]
-        )
     if uploaded_styles:
         ss.style_images = runstate.save_ref_images(
             ss.run_dir, [(f.name, f.getvalue()) for f in uploaded_styles],
@@ -666,9 +689,9 @@ with col_gen:
     if st.button(f"🖼️ 生成待生成的 {pending_total} 张图（后台运行）", type="primary", disabled=not pending_total):
         _submit_images(pending_masters, pending_derived)
 with col_info:
-    if not uploaded_refs and not ss.ref_images:
-        st.info("未上传产品参考图，将走纯文生图；上传参考图可让产品与实物一致。")
     bits = []
+    if ss.ref_images:  # 老任务遗留的产品参考图（Step 0 上传位已移除，生图时仍生效）
+        bits.append("产品参考图")
     if uploaded_styles or ss.style_images:
         bits.append("风格参考图")
     if uploaded_logos or ss.logo_images:
