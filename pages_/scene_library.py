@@ -9,6 +9,7 @@ import json
 import streamlit as st
 
 from core import db, runstate, store
+from core.config import OUTPUTS_DIR
 
 st.title("🗃 场景库")
 
@@ -65,6 +66,37 @@ def _delete_picked():
     st.rerun()
 
 
+def _inherit_ref_images(run_dir, product_info: str, state: dict) -> None:
+    """把同产品最近一个带风格图/Logo 的任务的参考图复制进新任务。
+
+    按 product_info 全等匹配（与场景去重同一取舍）；匹配不到就留空，
+    用户可在工作流 Step 0 上传或「从历史图中选择」。"""
+    for sp in sorted(OUTPUTS_DIR.glob("*/state.json"), reverse=True):  # 目录名以时间开头，新→旧
+        if sp.parent == run_dir:
+            continue
+        try:
+            s = json.loads(sp.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if s.get("product_info") != product_info:
+            continue
+        if not (s.get("style_images") or s.get("logo_images")):
+            continue
+        for attr, dirname in (
+            ("style_images", runstate.STYLE_REFS_DIRNAME),
+            ("logo_images", runstate.LOGO_REFS_DIRNAME),
+        ):
+            files = []
+            for rel in s.get(attr) or []:
+                p = sp.parent / rel
+                if p.exists():
+                    # run 目录里的文件名形如 "0_原名.png"，去掉序号前缀
+                    files.append((p.name.split("_", 1)[-1], p.read_bytes()))
+            if files:
+                state[attr] = runstate.save_ref_images(run_dir, files, dirname=dirname)
+        return
+
+
 def _create_gen_task() -> str:
     """用选中场景新建独立生图任务并跳转工作流；返回错误信息（成功直接跳页）。"""
     picked_products = {r["product_info"] for r in picked}
@@ -92,6 +124,7 @@ def _create_gen_task() -> str:
             "jobs_gen": 0,
         }
     )
+    _inherit_ref_images(run_dir, product_info, state)
     runstate.persist(run_dir, state)
     st.session_state["load_run_request"] = str(run_dir)
     st.switch_page("pages_/workflow.py")

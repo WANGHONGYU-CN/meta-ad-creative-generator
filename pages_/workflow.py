@@ -16,7 +16,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from core import db, imagen, llm, runstate, store
+from core import assets, db, imagen, llm, runstate, store
 from core import tasks as bg
 from core.config import OUTPUTS_DIR, load_config
 from core.prompts import load_prompts, render
@@ -25,6 +25,7 @@ st.title("🎨 Meta 素材工作流")
 
 config = load_config()
 prompts = load_prompts()
+assets.ensure_backfill()  # 参考图库首次自动导入历史任务的风格图/Logo（之后仅一次文件 stat）
 
 if not config["anthropic_api_key"] or not config["openai_api_key"]:
     st.warning("请先到「设置」页填写 Anthropic 和 OpenAI 的 API Key。")
@@ -103,8 +104,10 @@ def persist():
 def _clear_chat_keys():
     for k in [k for k in list(ss.keys()) if str(k).startswith("chat_")]:
         del ss[k]
-    # 上传指纹/暂存跟任务走：切换/新建任务后重置，让上传框里的文件重新存进新任务
-    for k in ("_fp_style", "_fp_logo", "_pending_style_images", "_pending_logo_images"):
+    # 上传指纹跟任务走：切换/新建任务后重置，让上传框里的文件重新存进新任务。
+    # 注意 _pending_* 暂存不清——还没建任务时上传的图，切换/载入任务后应自动存进新任务
+    # （与指纹重置的语义一致），清掉会丢图。
+    for k in ("_fp_style", "_fp_logo"):
         ss.pop(k, None)
 
 
@@ -296,17 +299,19 @@ def _sync_uploads():
     按 文件名+大小 指纹判断是否有新上传，避免每次重跑重复写盘。"""
     groups = (
         ([(f.name, f.getvalue()) for f in uploaded_styles or []],
-         "style_images", runstate.STYLE_REFS_DIRNAME, "_fp_style"),
+         "style_images", runstate.STYLE_REFS_DIRNAME, "_fp_style", "style"),
         ([(uploaded_logos.name, uploaded_logos.getvalue())] if uploaded_logos else [],
-         "logo_images", runstate.LOGO_REFS_DIRNAME, "_fp_logo"),
+         "logo_images", runstate.LOGO_REFS_DIRNAME, "_fp_logo", "logo"),
     )
     changed = False
-    for files, attr, dirname, fp_key in groups:
+    for files, attr, dirname, fp_key, kind in groups:
         pend_key = f"_pending_{attr}"
         fp = [(n, len(b)) for n, b in files]
         if files and ss.get(fp_key) != fp:
             ss[fp_key] = fp
             ss[pend_key] = files
+            for n, b in files:  # 同步收录进全局参考图库（内容去重），供各任务复用
+                assets.add(kind, n, b)
         if ss.run_dir and ss.get(pend_key):
             ss[attr] = runstate.save_ref_images(ss.run_dir, ss[pend_key], dirname=dirname)
             ss.pop(pend_key, None)
@@ -355,8 +360,49 @@ def _ref_thumbs(col, attr: str, label: str):
                     st.rerun()
 
 
+def _asset_picker(col, kind: str, attr: str, dirname: str, label: str, multi: bool):
+    """「从历史图选择」：全局参考图库（data/ref_assets）的缩略图勾选区。
+    应用 = 整组替换当前任务的该类参考图；任务未建时先暂存、建任务后自动落盘。"""
+    with col, st.expander(f"📚 从历史{label}中选择（跨任务累积）"):
+        paths = assets.list_assets(kind)
+        if not paths:
+            st.caption("暂无历史图，上传过一次后这里会自动累积。")
+            return
+        picked = []
+        tcols = st.columns(3)
+        for i, path in enumerate(paths):
+            with tcols[i % 3]:
+                st.image(path, caption=assets.display_name(path), use_container_width=True)
+                c_pick, c_del = st.columns([2, 1])
+                if c_pick.checkbox("选用", key=f"asset_pick_{kind}_{Path(path).name}"):
+                    picked.append(path)
+                if c_del.button(
+                    "✕", key=f"asset_del_{kind}_{Path(path).name}",
+                    help="从历史库删除（不影响已生成的任务）",
+                ):
+                    assets.remove(path)
+                    st.rerun()
+        too_many = not multi and len(picked) > 1
+        if too_many:
+            st.warning("Logo 只能选 1 张，请取消多余勾选。")
+        if st.button(
+            f"应用所选 {len(picked)} 张（整组替换当前{label}）",
+            key=f"asset_apply_{kind}", disabled=not picked or too_many,
+        ):
+            files = [(assets.display_name(p), Path(p).read_bytes()) for p in picked]
+            if ss.run_dir:
+                ss[attr] = runstate.save_ref_images(ss.run_dir, files, dirname=dirname)
+                ss.pop(f"_pending_{attr}", None)
+                persist()
+            else:
+                ss[f"_pending_{attr}"] = files
+            st.rerun()
+
+
 _ref_thumbs(col_style, "style_images", "风格参考图")
 _ref_thumbs(col_logo, "logo_images", "Logo")
+_asset_picker(col_style, "style", "style_images", runstate.STYLE_REFS_DIRNAME, "风格参考图", multi=True)
+_asset_picker(col_logo, "logo", "logo_images", runstate.LOGO_REFS_DIRNAME, "Logo", multi=False)
 
 col_ratio, col_count = st.columns(2)
 with col_ratio:
@@ -698,6 +744,8 @@ with col_info:
         bits.append("品牌 Logo")
     if bits:
         st.caption(f"已带 {' + '.join(bits)}，生图时会随提示词一并发给模型。")
+    elif pending_total:
+        st.warning("⚠ 本任务未带任何参考图（风格图/Logo），将纯文生图。可回 Step 0 上传或「从历史图中选择」。")
 
 
 def make_image_feedback(i: int):
