@@ -1,9 +1,12 @@
-"""后台任务执行器：生图 / 批量文案 两类耗时管线。
+"""后台任务执行器：生图 / 批量文案 两类耗时管线 + 单张图片修改（并发）。
 
 - 模块级单例线程池，整个 Streamlit 进程共享（页面重跑不会重建）；
 - 线程内不访问 st.session_state（CLAUDE.md 决策 11）：入参在主线程取好传入，
   进度写本模块状态表，结果经 runstate.update() 锁内逐条落盘 state.json/manifest/数据库；
-- 每个 run 同一时间只允许一个后台任务（submit 拒绝重复提交），UI 侧据此锁定该任务的编辑区；
+- 每个 run 同一时间只允许一个后台**管线**（submit 拒绝重复提交），UI 侧据此锁定该任务的编辑区；
+- 单张图片修改（submit_image_edit）是独立轻量通道：不锁整页、多张图可并发修改
+  （同一张图不允许重复提交），与管线互斥——管线运行中拒绝提交修改，反之亦然；
+  UI persist 守卫用 is_busy()（管线或任一修改在跑都跳过，决策 12 延伸）；
 - 「后台」指不阻塞页面、切任务/刷新页面不中断；关闭 Streamlit 进程则任务终止，
   已完成的子项均已落盘，重启后重新提交只补缺。
 """
@@ -11,7 +14,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from core import db, imagen, llm, runstate, store
+from core import db, imagen, llm, runstate
 from core.logger import get_logger
 from core.prompts import render
 
@@ -21,6 +24,7 @@ KIND_LABELS = {"images": "生图", "copies": "批量生成文案"}
 
 _executor = ThreadPoolExecutor(max_workers=8)
 _status: dict = {}
+_edit_status: dict = {}  # run_key -> {job_index: {"state": running/finished/failed, "error": str}}
 _guard = threading.Lock()
 
 
@@ -33,6 +37,28 @@ def status(run_key: str) -> dict | None:
 def is_running(run_key: str) -> bool:
     s = status(run_key)
     return bool(s and s["state"] == "running")
+
+
+def edit_status(run_key: str) -> dict:
+    """该 run 所有图片修改的状态快照 {job_index: {state, error}}。"""
+    with _guard:
+        return {i: dict(s) for i, s in (_edit_status.get(run_key) or {}).items()}
+
+
+def edits_running(run_key: str) -> bool:
+    with _guard:
+        return any(s["state"] == "running" for s in (_edit_status.get(run_key) or {}).values())
+
+
+def is_busy(run_key: str) -> bool:
+    """管线或任一图片修改在跑。UI 的 persist 守卫用（决策 12 延伸）。"""
+    return is_running(run_key) or edits_running(run_key)
+
+
+def clear_edit(run_key: str, i: int) -> None:
+    """UI 收割完某张图的修改结果后清除其状态记录。"""
+    with _guard:
+        (_edit_status.get(run_key) or {}).pop(i, None)
 
 
 def mark_consumed(run_key: str) -> None:
@@ -59,6 +85,9 @@ def _submit(kind: str, run_dir: Path, fn) -> bool:
     with _guard:
         cur = _status.get(key)
         if cur and cur["state"] == "running":
+            return False
+        # 与单张图片修改互斥：修改跑到一半时启动管线会用旧下标/旧图互相覆盖
+        if any(s["state"] == "running" for s in (_edit_status.get(key) or {}).values()):
             return False
         _status[key] = {
             "kind": kind, "state": "running", "done": 0, "total": 0,
@@ -90,7 +119,7 @@ def _apply_image(run_dir: Path, i: int, png: bytes, image_prompt=None) -> None:
         if i >= len(jobs):
             return
         job = jobs[i]
-        path = store.save_image(Path(run_dir), job["filename"], png)
+        path = runstate.apply_image_version(Path(run_dir), job, png)  # 写主图 + 追加版本历史
         job["image_path"] = str(path)
         job["copies"] = []
         job["rev"] = job.get("rev", 0) + 1
@@ -290,3 +319,48 @@ def submit_copywriting(config, prompts, run_dir, indices, title_count, product_i
                     _add_error(key, f"「{job['sub_scene']}（{job['ratio']}）」文案生成失败：{e}")
 
     return _submit("copies", run_dir, work)
+
+
+def submit_image_edit(config, prompts, run_dir, i: int, feedback: str) -> bool:
+    """单张图对话修改（后台并发）：不锁整页、只锁这张图，多张图可同时修改。
+    管线运行中或同一张图已有修改在跑时拒绝（返回 False）。结果经 _apply_image
+    落盘（含版本历史），UI 侧轮询 edit_status 收割。"""
+    key = Path(run_dir).name
+    with _guard:
+        cur = _status.get(key)
+        if cur and cur["state"] == "running":
+            return False
+        edits = _edit_status.setdefault(key, {})
+        if edits.get(i, {}).get("state") == "running":
+            return False
+        edits[i] = {"state": "running", "error": ""}
+
+    tpl = prompts["image_refine"]["template"]
+
+    def _finish(state: str, error: str = ""):
+        with _guard:
+            if i in _edit_status.get(key, {}):
+                _edit_status[key][i] = {"state": state, "error": error}
+
+    def work():
+        log.info("图片修改开始 run=%s job=%d", key, i)
+        try:
+            state = runstate.load(run_dir) or runstate.default_state()
+            jobs = state.get("jobs", [])
+            if i >= len(jobs):
+                raise RuntimeError("任务列表已变化，找不到这张图")
+            job = jobs[i]
+            img_path = Path(job.get("image_path", ""))
+            if not job.get("image_path") or not img_path.exists():
+                raise RuntimeError("找不到当前图片文件")
+            edit_prompt = render(tpl, {"feedback": feedback})
+            png = imagen.edit_image(config, img_path.read_bytes(), edit_prompt, job["ratio"])
+            _apply_image(run_dir, i, png)
+            _finish("finished")
+            log.info("图片修改完成 run=%s job=%d", key, i)
+        except Exception as e:  # noqa: BLE001
+            log.exception("图片修改失败 run=%s job=%d", key, i)
+            _finish("failed", f"{type(e).__name__}: {e}")
+
+    _executor.submit(work)
+    return True

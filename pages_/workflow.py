@@ -8,16 +8,21 @@
 - 任务 = 一个 run 目录：完整工作状态持久化在 run 目录 state.json（core/runstate.py），
   侧边栏可新建/切换任务，历史素材页可把老任务载入继续编辑
 - 后台任务：耗时环节（Step2 生图改尺寸 / Step3 批量文案）提交后台线程池
-  （core/tasks.py），期间本任务页面锁定并轮询进度，可切到其它任务继续工作；
-  对话式修改（改图/改文案等）保持前台同步——单次交互需要即时看结果
+  （core/tasks.py），期间本任务页面锁定并轮询进度，可切到其它任务继续工作
+- 图片对话修改走后台**并发**通道（bg.submit_image_edit）：不锁整页、多张图可同时改，
+  只有被修改的图卡片锁定；每张图有版本历史（上一步/下一步/任意回跳，上限 10 版）
+- 点击提速：勾选场景等高频操作只打脏标记（mark_dirty），落盘收敛到关键节点 +
+  15 秒兜底；场景卡片区为 st.fragment，点卡片只局部重跑不整页刷新
 - 双尺寸母版派生 / 场景卡片多选 / 持续对话修改 等机制不变（CLAUDE.md 决策 9/10/11）
 """
 import json
+import math
+import time
 from pathlib import Path
 
 import streamlit as st
 
-from core import assets, db, imagen, llm, runstate, store
+from core import assets, db, llm, runstate, store
 from core import tasks as bg
 from core.config import OUTPUTS_DIR, load_config
 from core.prompts import load_prompts, render
@@ -99,9 +104,18 @@ def state_from_ss() -> dict:
 
 def persist():
     """把当前任务状态落盘（state.json + manifest + 数据库）。
-    本任务有后台作业在跑时跳过——磁盘上的 state 正由后台更新，不能用旧内存副本覆盖。"""
-    if ss.run_dir and not bg.is_running(token()):
+    本任务有后台作业（管线或图片修改）在跑时跳过——磁盘上的 state 正由后台更新，
+    不能用旧内存副本覆盖（决策 12）；此时脏标记保留，等后台结束后的下次落盘补上。"""
+    if ss.run_dir and not bg.is_busy(token()):
         runstate.persist(ss.run_dir, state_from_ss())
+        ss["_dirty"] = False
+        ss["_last_persist"] = time.time()
+
+
+def mark_dirty():
+    """高频轻操作（勾选场景等）只打脏标记，落盘收敛到关键节点 + 15 秒兜底——
+    每次点击都写 state.json/manifest/SQLite（/mnt/c 慢盘三连写）是点击延迟的主因。"""
+    ss["_dirty"] = True
 
 
 def _clear_chat_keys():
@@ -142,6 +156,7 @@ def _load_task(run_dir: Path) -> bool:
         return False
     ss.run_dir = run_dir
     _fill_ss_from_state(state)
+    ss["_dirty"] = False
     return True
 
 
@@ -156,6 +171,7 @@ def _new_task():
     ss["ad_language"] = ""
     ss.ratio_choice = RATIO_LABELS[0]
     ss["title_count"] = 3
+    ss["_dirty"] = False
 
 
 # ---------------------------------------------------------------- 历史页跳转载入
@@ -193,6 +209,10 @@ if sel != _current_choice:
     elif not _load_task(OUTPUTS_DIR / sel):
         ss["_pending_task_select"] = _current_choice
     st.rerun()
+
+# 脏数据兜底：高频操作只打脏标记，任意一次重跑时距上次落盘超 15 秒就顺手写一次
+if ss.get("_dirty") and ss.run_dir and time.time() - ss.get("_last_persist", 0.0) > 15:
+    persist()
 
 # ---------------------------------------------------------------- 后台任务：锁定 / 收割
 tok = token()
@@ -232,10 +252,48 @@ if stat and stat["errors"]:
         for e in stat["errors"]:
             st.error(e)
 
+# ---------------------------------------------------------------- 图片并发修改：收割 / 轮询
+_edits = bg.edit_status(tok) if tok else {}
+for _i, _es in list(_edits.items()):
+    if _es["state"] not in ("finished", "failed"):
+        continue
+    bg.clear_edit(tok, _i)
+    _chat = ss.get(f"chat_image_{ss.jobs_gen}_{_i}")
+    if _es["state"] == "failed":
+        st.error(f"❌ 图片修改失败：{_es['error']}")
+        if _chat is not None:
+            _chat.append({"role": "assistant", "content": f"❌ 修改失败：{_es['error']}"})
+        continue
+    # 只把这张图（含新版本历史）和受它牵连的派生图从盘合并回内存，不整页重载，
+    # 页面上其它未落盘的改动不受影响
+    _disk_jobs = (runstate.load(ss.run_dir) or {}).get("jobs", [])
+    if _i < len(_disk_jobs) and _i < len(ss.jobs):
+        ss.jobs[_i] = _disk_jobs[_i]
+        _fname = _disk_jobs[_i].get("filename", "")
+        for _k, _dj in enumerate(_disk_jobs):
+            if _dj.get("derived_from") == _fname and _k < len(ss.jobs):
+                ss.jobs[_k] = _dj
+        st.toast(f"✅ 「{_disk_jobs[_i]['sub_scene']}（{_disk_jobs[_i]['ratio']}）」修改完成")
+    if _chat is not None:
+        _chat.append({"role": "assistant", "content": "✅ 修改完成，图片已更新"})
+
+_editing_jobs = {i for i, s in _edits.items() if s["state"] == "running"}
+if _editing_jobs:
+    @st.fragment(run_every=2.0)
+    def _watch_edits():
+        e = bg.edit_status(tok)
+        if not e or any(s["state"] != "running" for s in e.values()):
+            st.rerun(scope="app")
+            return
+        st.caption(f"🎨 {len(e)} 张图正在后台修改，完成后自动更新；期间可继续修改其它图或做别的操作。")
+
+    _watch_edits()
+
 
 # ---------------------------------------------------------------- 对话修改通用件
 def chat_box(chat_key: str, apply_feedback, placeholder="输入修改意见，AI 会在当前结果基础上修改…"):
-    """通用修改对话框：展示历史 + 输入框；apply_feedback(fb) 负责真正修改结果。"""
+    """通用修改对话框：展示历史 + 输入框；apply_feedback(fb) 负责真正修改结果，
+    可返回自定义回复文案（如图片修改的「已提交后台」），返回 None 用默认文案。"""
     history = ss.setdefault(chat_key, [])
     for msg in history:
         with st.chat_message(msg["role"]):
@@ -248,8 +306,7 @@ def chat_box(chat_key: str, apply_feedback, placeholder="输入修改意见，AI
         feedback = feedback.strip()
         with st.spinner("AI 修改中…"):
             try:
-                apply_feedback(feedback)
-                reply = "✅ 已按意见修改"
+                reply = apply_feedback(feedback) or "✅ 已按意见修改"
             except Exception as e:  # noqa: BLE001
                 reply = f"❌ 修改失败：{e}"
         history.append({"role": "user", "content": feedback})
@@ -511,8 +568,11 @@ def apply_scene_feedback(feedback: str):
         db.upsert_scene_rows_safe(ss.get("product_info", ""), ss.run_dir.name, cleaned)
 
 
-selected_rows = []
-if ss.scenes:
+@st.fragment
+def _scene_section():
+    """场景筛选 + 卡片区。整体是 st.fragment：点卡片勾选/取消只局部重跑本区域，
+    不再整页刷新两遍（点击提速的另一半）；勾选只打脏标记，落盘等关键节点。
+    区域外依赖勾选数的文字（如 Step2 按钮上的数量）在下一次全页重跑时自然更新。"""
     st.caption("点击卡片勾选/取消细分场景（可多选）；对结果不满意可在下方对话框让 AI 修改。")
 
     # 筛选器：只影响卡片展示，不影响已勾选状态（无评分的老场景在分数筛选 >0 时会被隐藏）
@@ -520,7 +580,7 @@ if ss.scenes:
     has_scores = any(
         (row.get("detail") or {}).get("total_score") is not None for row in ss.scenes
     )
-    fcol1, fcol2 = st.columns([3, 2])
+    fcol1, fcol2, fcol3 = st.columns([3, 2, 2])
     with fcol1:
         picked_mains = st.multiselect(
             "筛选主场景（不选 = 全部）", main_names, key=f"scene_filter_main_{tok}"
@@ -530,6 +590,13 @@ if ss.scenes:
             st.slider("最低综合评分", 0, 100, 0, key=f"scene_filter_score_{tok}")
             if has_scores
             else 0
+        )
+    with fcol3:
+        compact = st.toggle(
+            "精简模式",
+            value=True,
+            key=f"scene_compact_{tok}",
+            help="每个主场景只显示综合评分最高的前 30%（至少 2 个），已勾选的场景恒显示；关掉即展开全部。",
         )
 
     def _scene_visible(row: dict) -> bool:
@@ -552,8 +619,23 @@ if ss.scenes:
     groups = {}
     for idx in visible:
         groups.setdefault(ss.scenes[idx].get("main_scene", ""), []).append(idx)
+
+    def _score_of(idx: int) -> float:
+        s = (ss.scenes[idx].get("detail") or {}).get("total_score")
+        return float(s) if isinstance(s, (int, float)) else -1.0
+
+    collapsed = {}  # 主场景 -> 精简模式下收起的数量
+    if compact:
+        for main, indices in groups.items():
+            keep = max(2, math.ceil(len(indices) * 0.3))
+            top = set(sorted(indices, key=lambda i: -_score_of(i))[:keep])
+            shown = [i for i in indices if i in top or i in ss.selected_scenes]
+            collapsed[main] = len(indices) - len(shown)
+            groups[main] = shown
+
     for main, indices in groups.items():
-        st.markdown(f"##### {main}")
+        hidden_n = collapsed.get(main, 0)
+        st.markdown(f"##### {main}" + (f"　`已收起 {hidden_n} 个低分场景`" if hidden_n else ""))
         cols = st.columns(3)
         for n, idx in enumerate(indices):
             row = ss.scenes[idx]
@@ -592,20 +674,25 @@ if ss.scenes:
                         ss.selected_scenes = [i for i in ss.selected_scenes if i != idx]
                     else:
                         ss.selected_scenes = ss.selected_scenes + [idx]
-                    persist()
-                    st.rerun()
+                    mark_dirty()
+                    st.rerun(scope="fragment")
     with st.expander("💬 对场景结果不满意？让 AI 修改", expanded=False):
         chat_box("chat_scenes", apply_scene_feedback, placeholder="例：场景太泛了，聚焦冬季户外；把第 2 个主场景换成送礼场景…")
 
-    selected_rows = [ss.scenes[i] for i in ss.selected_scenes if i < len(ss.scenes)]
-    if selected_rows:
+    n_sel = len([i for i in ss.selected_scenes if i < len(ss.scenes)])
+    if n_sel:
         extra = "（每个场景 = 4:5 母版 + 改尺寸 1:1）" if dual_mode else ""
         st.caption(
-            f"已选 **{len(selected_rows)}** 个细分场景 × {len(ratios)} 个尺寸 = "
-            f"将生成 {len(selected_rows) * len(ratios)} 张图{extra}"
+            f"已选 **{n_sel}** 个细分场景 × {len(ratios)} 个尺寸 = "
+            f"将生成 {n_sel * len(ratios)} 张图{extra}"
         )
     else:
         st.caption("尚未选择场景。")
+
+
+if ss.scenes:
+    _scene_section()
+selected_rows = [ss.scenes[i] for i in ss.selected_scenes if i < len(ss.scenes)]
 
 st.divider()
 
@@ -653,6 +740,9 @@ def _build_jobs(rows: list) -> list:
 
 
 def _submit_images(master_indices: list, derived_indices: list):
+    if bg.edits_running(tok):
+        st.warning("有图片正在后台修改，请等修改完成后再生图。")
+        return
     if uploaded_styles:
         ss.style_images = runstate.save_ref_images(
             ss.run_dir, [(f.name, f.getvalue()) for f in uploaded_styles],
@@ -678,15 +768,18 @@ with col_gen_all:
         type="primary",
         disabled=not selected_rows,
     ):
-        ss.jobs_gen = g = g + 1
-        # 清理上一批 job 的对话历史
-        for k in [k for k in list(ss.keys()) if str(k).startswith(("chat_prompt_", "chat_image_", "chat_copies_"))]:
-            del ss[k]
-        ss.jobs = _build_jobs(selected_rows)
-        _submit_images(
-            [i for i, j in enumerate(ss.jobs) if not j.get("derived_from")],
-            [i for i, j in enumerate(ss.jobs) if j.get("derived_from")],
-        )
+        if bg.edits_running(tok):
+            st.warning("有图片正在后台修改，请等修改完成后再生图。")
+        else:
+            ss.jobs_gen = g = g + 1
+            # 清理上一批 job 的对话历史
+            for k in [k for k in list(ss.keys()) if str(k).startswith(("chat_prompt_", "chat_image_", "chat_copies_"))]:
+                del ss[k]
+            ss.jobs = _build_jobs(selected_rows)
+            _submit_images(
+                [i for i, j in enumerate(ss.jobs) if not j.get("derived_from")],
+                [i for i, j in enumerate(ss.jobs) if j.get("derived_from")],
+            )
 with col_ref_info:
     bits = []
     if ss.ref_images:  # 老任务遗留的产品参考图（Step 0 上传位已移除，生图时仍生效）
@@ -752,9 +845,9 @@ def _master_index(job: dict):
 
 
 def _apply_new_image_ss(i: int, png: bytes):
-    """前台版：写盘并更新 job；若该图是母版，其派生图自动失效待重做。"""
+    """前台版：写盘（含版本历史）并更新 job；若该图是母版，其派生图自动失效待重做。"""
     job = ss.jobs[i]
-    path = store.save_image(ss.run_dir, job["filename"], png)
+    path = runstate.apply_image_version(ss.run_dir, job, png)
     job["image_path"] = str(path)
     job["copies"] = []
     job["rev"] = job.get("rev", 0) + 1
@@ -785,19 +878,92 @@ if pending_total:
 
 
 def make_image_feedback(i: int):
+    """图片修改改为后台并发（bg.submit_image_edit）：提交即返回，不再前台等 1-2 分钟；
+    多张图可同时修改，完成后页面顶部收割区自动合并结果。"""
+
     def apply(feedback: str):
         job = ss.jobs[i]
-        cur = _img_bytes(job["image_path"], job.get("rev", 0))
-        if not cur:
+        if not _has_image(job):
             raise RuntimeError("找不到当前图片文件")
-        edit_prompt = render(prompts["image_refine"]["template"], {"feedback": feedback})
-        png = imagen.edit_image(config, cur, edit_prompt, job["ratio"])
-        runstate.save_prev_image(ss.run_dir, job["filename"], cur)
-        _apply_new_image_ss(i, png)
-        ss.jobs[i]["has_prev"] = True
-        persist()
+        if not bg.submit_image_edit(config, prompts, ss.run_dir, i, feedback):
+            raise RuntimeError("这张图已有修改在进行中，或本任务后台管线正在运行")
+        return "🕐 已提交后台修改，完成后图片自动更新；期间可继续修改其它图或做别的操作"
 
     return apply
+
+
+def _goto_version(i: int, new_idx: int):
+    """把第 i 张图切到版本 new_idx（上一步/下一步/任意回跳）。
+    走 runstate.update 锁内改盘（与并发的图片修改互不覆盖），再把结果合并回内存。"""
+    hit = {}
+
+    def mut(state):
+        jobs = state.get("jobs", [])
+        if i >= len(jobs):
+            return
+        job = jobs[i]
+        if not runstate.goto_image_version(ss.run_dir, job, new_idx):
+            return
+        job["rev"] = job.get("rev", 0) + 1
+        job["copies"] = []
+        if not job.get("derived_from"):  # 母版换版本 → 派生图失效待重做
+            for other in jobs:
+                if other is not job and other.get("derived_from") == job["filename"]:
+                    other["image_path"] = ""
+                    other["copies"] = []
+                    other["has_prev"] = False
+        hit["filename"] = job["filename"]
+
+    state = runstate.update(ss.run_dir, mut)
+    if not hit:
+        st.error("该版本的图片文件不存在。")
+        return
+    disk_jobs = state.get("jobs", [])
+    if i < len(ss.jobs) and i < len(disk_jobs):
+        ss.jobs[i] = disk_jobs[i]
+        for k, dj in enumerate(disk_jobs):
+            if dj.get("derived_from") == hit["filename"] and k < len(ss.jobs):
+                ss.jobs[k] = dj
+    st.rerun()
+
+
+def _hist_bar(i: int, job: dict):
+    """图片下方的版本导航：◀ 上一版 / 下一版 ▶ + 历史缩略图任意回跳。
+    历史机制启用前的老图（只有 .prev 单版回退）保留旧按钮，首次修改后自动并入版本链。"""
+    hist = job.get("hist") or []
+    if len(hist) >= 2:
+        hidx = int(job.get("hist_idx", len(hist) - 1))
+        c1, c2, c3 = st.columns([1.2, 1, 1.2])
+        if c1.button("◀ 上一版", key=f"hprev_{tok}_{g}_{i}", disabled=hidx <= 0, use_container_width=True):
+            _goto_version(i, hidx - 1)
+        c2.caption(f"{hidx + 1} / {len(hist)} 版")
+        if c3.button("下一版 ▶", key=f"hnext_{tok}_{g}_{i}", disabled=hidx >= len(hist) - 1, use_container_width=True):
+            _goto_version(i, hidx + 1)
+        with st.expander("🕘 历史版本", expanded=False):
+            st.caption(f"最多保留最近 {runstate.HIST_LIMIT} 版；回到旧版后再修改，会丢弃它后面的版本。")
+            tcols = st.columns(3)
+            for k, rel in enumerate(hist):
+                p = Path(ss.run_dir) / rel
+                with tcols[k % 3]:
+                    if p.exists():
+                        st.image(
+                            str(p),
+                            caption=f"第 {k + 1} 版" + ("（当前）" if k == hidx else ""),
+                            use_container_width=True,
+                        )
+                    if k != hidx and st.button("回到此版", key=f"hgoto_{tok}_{g}_{i}_{k}", use_container_width=True):
+                        _goto_version(i, k)
+    elif job.get("has_prev"):
+        if st.button("↩️ 回退上一版", key=f"revert_{tok}_{g}_{i}"):
+            prev = runstate.load_prev_image(ss.run_dir, job["filename"])
+            if prev:
+                runstate.delete_prev_image(ss.run_dir, job["filename"])
+                _apply_new_image_ss(i, prev)
+                job["has_prev"] = False
+                persist()
+                st.rerun()
+            else:
+                st.error("上一版图片文件不存在")
 
 
 display = [i for i, j in enumerate(ss.jobs) if _has_image(j) or j.get("derived_from")]
@@ -815,29 +981,23 @@ if display:
                     + ("・改尺寸自母版" if derived else ""),
                     use_container_width=True,
                 )
-                if derived:
-                    if st.button("🔄 重新改尺寸", key=f"regen_{tok}_{g}_{i}"):
-                        _submit_images([], [i])
+                if i in _editing_jobs:
+                    st.info("🎨 修改中…（后台运行，完成后自动更新，期间可操作其它图）")
                 else:
-                    if st.button("🔄 重新生成这张", key=f"regen_{tok}_{g}_{i}"):
-                        _submit_images([i], [])
-                if job.get("has_prev") and st.button("↩️ 回退上一版", key=f"revert_{tok}_{g}_{i}"):
-                    prev = runstate.load_prev_image(ss.run_dir, job["filename"])
-                    if prev:
-                        runstate.delete_prev_image(ss.run_dir, job["filename"])
-                        _apply_new_image_ss(i, prev)
-                        job["has_prev"] = False
-                        persist()
-                        st.rerun()
+                    if derived:
+                        if st.button("🔄 重新改尺寸", key=f"regen_{tok}_{g}_{i}"):
+                            _submit_images([], [i])
                     else:
-                        st.error("上一版图片文件不存在")
-                with st.expander("💬 修改这张图", expanded=False):
-                    st.caption("在当前图基础上按意见重绘，改完可回退上一版。")
-                    chat_box(
-                        f"chat_image_{g}_{i}",
-                        make_image_feedback(i),
-                        placeholder="例：背景换成海边；把产品放大一点；整体调亮…",
-                    )
+                        if st.button("🔄 重新生成这张", key=f"regen_{tok}_{g}_{i}"):
+                            _submit_images([i], [])
+                    _hist_bar(i, job)
+                    with st.expander("💬 修改这张图", expanded=False):
+                        st.caption("在当前图基础上按意见重绘（后台运行，多张图可同时改）；历史版本可随时上一步/下一步。")
+                        chat_box(
+                            f"chat_image_{g}_{i}",
+                            make_image_feedback(i),
+                            placeholder="例：背景换成海边；把产品放大一点；整体调亮…",
+                        )
             else:
                 with st.container(border=True):
                     st.markdown(f"**{job['main_scene']} / {job['sub_scene']}（{job['ratio']}）**")
@@ -859,9 +1019,12 @@ if st.button(
     type="primary",
     disabled=not need_copy,
 ):
-    persist()
-    bg.submit_copywriting(config, prompts, ss.run_dir, need_copy, int(title_count), product_info)
-    st.rerun()
+    if bg.edits_running(tok):
+        st.warning("有图片正在后台修改，请等修改完成后再生成文案。")
+    else:
+        persist()
+        bg.submit_copywriting(config, prompts, ss.run_dir, need_copy, int(title_count), product_info)
+        st.rerun()
 
 
 def make_copies_feedback(i: int):

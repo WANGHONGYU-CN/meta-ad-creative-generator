@@ -22,7 +22,9 @@ STATE_NAME = "state.json"
 REFS_DIRNAME = "refs"
 STYLE_REFS_DIRNAME = "refs_style"  # 海报风格参考图
 LOGO_REFS_DIRNAME = "refs_logo"    # 品牌 Logo 图
-PREV_DIRNAME = ".prev"  # images/.prev/<filename> 存「回退上一版」的旧图
+PREV_DIRNAME = ".prev"  # images/.prev/<filename> 老机制的单版回退图（已被版本历史取代，首次修改时自动收编）
+HIST_DIRNAME = ".hist"  # images/.hist/<filename>/v{seq}.png 图片版本历史
+HIST_LIMIT = 10         # 每张图保留的最大版本数（含当前版），超出删最老的
 
 # manifest 协议字段白名单（不得增删，见 CLAUDE.md）
 MANIFEST_JOB_KEYS = [
@@ -208,3 +210,62 @@ def load_prev_image(run_dir: Path, filename: str) -> bytes | None:
 
 def delete_prev_image(run_dir: Path, filename: str) -> None:
     _prev_path(run_dir, filename).unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------- 图片版本历史
+def apply_image_version(run_dir: Path, job: dict, png: bytes) -> Path:
+    """把 png 落为该 job 的最新版本：写主图 images/<filename>，同时追加进版本链。
+
+    job 的 hist（版本相对路径列表）/hist_idx（当前位置）/hist_seq（版本号发号器）
+    为运行时字段（不进 manifest 白名单）。规则：
+    - 首次调用把已有主图（和老机制的 .prev 回退图）收编为历史版本，撤销才有得退；
+    - 若当前处于历史中间位置（回退过），先丢弃「后面」的版本（标准撤销语义）；
+    - 版本数超过 HIST_LIMIT 删最老的。
+    调用方须保证互斥（runstate.update 的 mutator 内，或前台单线程路径）。"""
+    run_dir = Path(run_dir)
+    filename = job["filename"]
+    hdir = run_dir / "images" / HIST_DIRNAME / filename
+    hdir.mkdir(parents=True, exist_ok=True)
+    hist = list(job.get("hist") or [])
+    seq = int(job.get("hist_seq", 0))
+
+    def _push(data: bytes):
+        nonlocal seq
+        rel = f"images/{HIST_DIRNAME}/{filename}/v{seq}.png"
+        (run_dir / rel).write_bytes(data)
+        hist.append(rel)
+        seq += 1
+
+    if not hist:
+        prev = load_prev_image(run_dir, filename)
+        if prev is not None:
+            _push(prev)
+            delete_prev_image(run_dir, filename)
+        cur = run_dir / "images" / filename
+        if cur.exists():
+            _push(cur.read_bytes())
+    else:
+        idx = int(job.get("hist_idx", len(hist) - 1))
+        for rel in hist[idx + 1:]:
+            (run_dir / rel).unlink(missing_ok=True)
+        hist = hist[: idx + 1]
+    _push(png)
+    while len(hist) > HIST_LIMIT:
+        (run_dir / hist.pop(0)).unlink(missing_ok=True)
+    job["hist"], job["hist_idx"], job["hist_seq"] = hist, len(hist) - 1, seq
+    return Path(store.save_image(run_dir, filename, png))
+
+
+def goto_image_version(run_dir: Path, job: dict, new_idx: int) -> bool:
+    """把主图切换到版本链的 new_idx（上一步/下一步/任意跳转），更新 image_path/hist_idx。
+    版本文件缺失或下标越界返回 False，其余善后（rev/copies/派生图失效）由调用方处理。"""
+    hist = job.get("hist") or []
+    if not (0 <= new_idx < len(hist)):
+        return False
+    p = Path(run_dir) / hist[new_idx]
+    if not p.exists():
+        return False
+    path = store.save_image(Path(run_dir), job["filename"], p.read_bytes())
+    job["image_path"] = str(path)
+    job["hist_idx"] = new_idx
+    return True
