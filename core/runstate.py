@@ -54,6 +54,8 @@ def default_state() -> dict:
         "ref_images": [],
         "style_images": [],
         "logo_images": [],
+        "brand_name": "",
+        "ad_language": "",
         "chats": {},
     }
 

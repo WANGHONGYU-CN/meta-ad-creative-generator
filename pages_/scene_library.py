@@ -67,10 +67,12 @@ def _delete_picked():
 
 
 def _inherit_ref_images(run_dir, product_info: str, state: dict) -> None:
-    """把同产品最近一个带风格图/Logo 的任务的参考图复制进新任务。
+    """把同产品最近任务的 参考图（风格图/Logo）和 品牌名/广告语言 继承进新任务。
 
-    按 product_info 全等匹配（与场景去重同一取舍）；匹配不到就留空，
-    用户可在工作流 Step 0 上传或「从历史图中选择」。"""
+    按 product_info 全等匹配（与场景去重同一取舍）；参考图取最近一个带图的任务，
+    品牌名/广告语言取最近一个填过的任务（可以来自不同任务）；匹配不到就留空，
+    用户可在工作流 Step 0 补填/上传或「从历史图中选择」。"""
+    need_refs, need_brand, need_lang = True, True, True
     for sp in sorted(OUTPUTS_DIR.glob("*/state.json"), reverse=True):  # 目录名以时间开头，新→旧
         if sp.parent == run_dir:
             continue
@@ -80,21 +82,28 @@ def _inherit_ref_images(run_dir, product_info: str, state: dict) -> None:
             continue
         if s.get("product_info") != product_info:
             continue
-        if not (s.get("style_images") or s.get("logo_images")):
-            continue
-        for attr, dirname in (
-            ("style_images", runstate.STYLE_REFS_DIRNAME),
-            ("logo_images", runstate.LOGO_REFS_DIRNAME),
-        ):
-            files = []
-            for rel in s.get(attr) or []:
-                p = sp.parent / rel
-                if p.exists():
-                    # run 目录里的文件名形如 "0_原名.png"，去掉序号前缀
-                    files.append((p.name.split("_", 1)[-1], p.read_bytes()))
-            if files:
-                state[attr] = runstate.save_ref_images(run_dir, files, dirname=dirname)
-        return
+        if need_brand and s.get("brand_name"):
+            state["brand_name"] = s["brand_name"]
+            need_brand = False
+        if need_lang and s.get("ad_language"):
+            state["ad_language"] = s["ad_language"]
+            need_lang = False
+        if need_refs and (s.get("style_images") or s.get("logo_images")):
+            for attr, dirname in (
+                ("style_images", runstate.STYLE_REFS_DIRNAME),
+                ("logo_images", runstate.LOGO_REFS_DIRNAME),
+            ):
+                files = []
+                for rel in s.get(attr) or []:
+                    p = sp.parent / rel
+                    if p.exists():
+                        # run 目录里的文件名形如 "0_原名.png"，去掉序号前缀
+                        files.append((p.name.split("_", 1)[-1], p.read_bytes()))
+                if files:
+                    state[attr] = runstate.save_ref_images(run_dir, files, dirname=dirname)
+            need_refs = False
+        if not (need_refs or need_brand or need_lang):
+            return
 
 
 def _create_gen_task() -> str:
@@ -151,7 +160,7 @@ with st.sidebar:
     _action_buttons("side")
     st.caption(
         "按钮常驻侧边栏，随时可点。创建生图任务 = 新建独立任务并跳到工作流"
-        "（场景已勾好，直接从 Step 2 开始），不影响正在后台跑的任务。"
+        "（场景已勾好，直接点生图），不影响正在后台跑的任务。"
     )
 
 
@@ -201,4 +210,4 @@ with col_ops:
     _action_buttons("bottom")
 with col_info:
     if picked:
-        st.caption("创建生图任务 = 新建一个独立任务并跳转到工作流（场景已选好，直接从 Step 2 开始）；不影响正在后台跑的任务。")
+        st.caption("创建生图任务 = 新建一个独立任务并跳转到工作流（场景已选好，直接点生图）；不影响正在后台跑的任务。")

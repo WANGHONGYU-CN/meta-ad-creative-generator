@@ -1,13 +1,14 @@
-"""主工作流页：多任务工作台（输入 → 找场景 → 生成生图提示词 → 生图 → 文案 → 导出）。
+"""主工作流页：多任务工作台（输入 → 找场景 → 变量直填生图 → 文案 → 导出）。
 
 关键机制：
-- Step2 提示词生成：把场景挖掘输出的全部变量（audience/selling_point/visual_brief/
-  headline/subheadline/cta 等）喂给 Claude（「② 生图提示词生成」模板，可在提示词管理页改），
-  产出含广告语的海报提示词；Step3 直接把该提示词发给生图模型（无风格外壳）
+- 生图提示词 = 场景挖掘变量直填模板（V4）：勾选场景后，把 audience/trigger/
+  pain_or_desire/product_use + 品牌名/广告语言/比例 本地替换进「② 生图总提示词」
+  模板（可在提示词管理页改），渲染结果就是最终提示词，直接发给生图模型——
+  不再经 Claude 生成提示词，点「生图」即开始出图
 - 任务 = 一个 run 目录：完整工作状态持久化在 run 目录 state.json（core/runstate.py），
   侧边栏可新建/切换任务，历史素材页可把老任务载入继续编辑
-- 后台任务：耗时环节（Step2 批量提示词 / Step3 生图改尺寸 / Step4 批量文案）提交
-  后台线程池（core/tasks.py），期间本任务页面锁定并轮询进度，可切到其它任务继续工作；
+- 后台任务：耗时环节（Step2 生图改尺寸 / Step3 批量文案）提交后台线程池
+  （core/tasks.py），期间本任务页面锁定并轮询进度，可切到其它任务继续工作；
   对话式修改（改图/改文案等）保持前台同步——单次交互需要即时看结果
 - 双尺寸母版派生 / 场景卡片多选 / 持续对话修改 等机制不变（CLAUDE.md 决策 9/10/11）
 """
@@ -81,6 +82,8 @@ def _infer_ratio_choice(jobs: list) -> str:
 def state_from_ss() -> dict:
     return {
         "product_info": ss.get("product_info", ""),
+        "brand_name": ss.get("brand_name", ""),
+        "ad_language": ss.get("ad_language", ""),
         "ratio_choice": ss.ratio_choice,
         "title_count": int(ss.get("title_count", 3)),
         "scenes": ss.scenes,
@@ -114,6 +117,8 @@ def _clear_chat_keys():
 def _fill_ss_from_state(state: dict):
     _clear_chat_keys()
     ss["product_info"] = state.get("product_info", "")
+    ss["brand_name"] = state.get("brand_name", "")
+    ss["ad_language"] = state.get("ad_language", "")
     rc = state.get("ratio_choice", "")
     ss.ratio_choice = rc if rc in RATIO_OPTIONS else (
         _infer_ratio_choice(state.get("jobs", [])) if state.get("jobs") else RATIO_LABELS[0]
@@ -147,6 +152,8 @@ def _new_task():
     ss.jobs_gen, ss.ref_images = 0, []
     ss.style_images, ss.logo_images = [], []
     ss["product_info"] = ""
+    ss["brand_name"] = ""
+    ss["ad_language"] = ""
     ss.ratio_choice = RATIO_LABELS[0]
     ss["title_count"] = 3
 
@@ -277,6 +284,11 @@ product_info = st.text_area(
     key="product_info",
     placeholder="例：便携颈挂风扇，卖点是超静音/续航18小时/可折叠，目标人群是欧美户外通勤人群，目标市场美国…",
 )
+col_brand, col_lang = st.columns(2)
+with col_brand:
+    st.text_input("品牌名称（融入海报设计，可留空）", key="brand_name", placeholder="例：CoolBreeze")
+with col_lang:
+    st.text_input("广告语言（海报文案使用的语言）", key="ad_language", placeholder="例：English / 中文 / Español")
 col_style, col_logo = st.columns(2)
 with col_style:
     uploaded_styles = st.file_uploader(
@@ -442,21 +454,6 @@ def _scene_rows_from_result(result: dict) -> list:
     return rows
 
 
-def _scene_prompt_desc(row: dict) -> str:
-    """喂给生图提示词环节的场景描述：新版场景用 visual_brief 等组合，老版用 description。"""
-    d = row.get("detail") or {}
-    parts = []
-    if d.get("visual_brief"):
-        parts.append(f"广告画面要求：{d['visual_brief']}")
-    if d.get("audience"):
-        parts.append(f"目标用户：{d['audience']}")
-    if d.get("product_use"):
-        parts.append(f"产品使用链路：{d['product_use']}")
-    if d.get("video_purpose"):
-        parts.append(f"成片用途：{d['video_purpose']}")
-    return "\n".join(parts) or row.get("description", "")
-
-
 if st.button("🔍 AI 挖掘场景", type="primary", disabled=not product_info.strip()):
     mined = False
     with st.spinner("Claude 正在挖掘场景…（内部生成候选并逐个评分，可能要 1-3 分钟）"):
@@ -612,28 +609,103 @@ if ss.scenes:
 
 st.divider()
 
-# ---------------------------------------------------------------- Step 2 生成生图提示词
-st.header("Step 2 · 生成生图提示词")
+# ---------------------------------------------------------------- Step 2 生图（变量直填总提示词）
+st.header("Step 2 · 生图")
 g = ss.jobs_gen
 
-if st.button("✏️ 为选中场景生成提示词（后台运行）", type="primary", disabled=not selected_rows):
-    ss.jobs_gen = g = g + 1
-    # 清理上一批 job 的对话历史
-    for k in [k for k in list(ss.keys()) if str(k).startswith(("chat_prompt_", "chat_image_", "chat_copies_"))]:
-        del ss[k]
-    ss.jobs = []
+
+def _render_job_prompt(row: dict, ratio: str) -> str:
+    """场景变量 + 品牌名/广告语言/比例 本地替换进「② 生图总提示词」模板（瞬时完成，
+    不调 Claude），渲染结果即最终提示词。{reference_style_image} 占位符保留，
+    由生图管线在发送瞬间按当时是否带风格图填充（core/tasks.py）。
+    老格式场景（无 detail）product_use 回退 description，其余字段为空。"""
+    d = row.get("detail") or {}
+    return render(
+        prompts["image_gen"]["template"],
+        {
+            "main_scene": row.get("main_scene", ""),
+            "sub_scene": row.get("sub_scene", ""),
+            "audience": d.get("audience", ""),
+            "trigger": d.get("trigger", ""),
+            "pain_or_desire": d.get("pain_or_desire", ""),
+            "product_use": d.get("product_use") or row.get("description", ""),
+            "aspect_ratio": ratio,
+            "ad_language": (ss.get("ad_language", "") or "").strip() or "与产品目标市场语言一致",
+            "brand_name": (ss.get("brand_name", "") or "").strip() or "未提供",
+        },
+    )
+
+
+def _build_jobs(rows: list) -> list:
+    """选中场景 → jobs（每张图一个）。双尺寸时 4:5 为母版，1:1 派生（决策 9）。"""
+    jobs = []
+    master_ratios = ["4:5"] if dual_mode else list(ratios)
+    for row in rows:
+        master_filename = ""
+        for ratio in master_ratios:
+            master_filename = store.image_filename(row["main_scene"], row["sub_scene"], ratio)
+            jobs.append(bg.new_job(row, ratio, _render_job_prompt(row, ratio), master_filename, ""))
+        if dual_mode and master_filename:
+            jobs.append(
+                bg.new_job(row, "1:1", "", store.image_filename(row["main_scene"], row["sub_scene"], "1:1"), master_filename)
+            )
+    return jobs
+
+
+def _submit_images(master_indices: list, derived_indices: list):
+    if uploaded_styles:
+        ss.style_images = runstate.save_ref_images(
+            ss.run_dir, [(f.name, f.getvalue()) for f in uploaded_styles],
+            dirname=runstate.STYLE_REFS_DIRNAME,
+        )
+    if uploaded_logos:
+        ss.logo_images = runstate.save_ref_images(
+            ss.run_dir, [(uploaded_logos.name, uploaded_logos.getvalue())],
+            dirname=runstate.LOGO_REFS_DIRNAME,
+        )
     persist()
-    # detail（目标用户/卖点/画面 brief/广告文字）原样传给提示词管线；description 换成组合文本供 manifest 使用
-    payload = [dict(r, description=_scene_prompt_desc(r)) for r in selected_rows]
-    bg.submit_prompt_generation(config, prompts, ss.run_dir, product_info, payload, dual_mode, ratios)
+    bg.submit_image_generation(
+        config, prompts, ss.run_dir, master_indices, derived_indices,
+        ss.ref_images, ss.style_images, ss.logo_images,
+    )
     st.rerun()
+
+
+col_gen_all, col_ref_info = st.columns([1, 2])
+with col_gen_all:
+    if st.button(
+        f"🖼️ 为选中的 {len(selected_rows)} 个场景生成 {len(selected_rows) * len(ratios)} 张图（后台运行）",
+        type="primary",
+        disabled=not selected_rows,
+    ):
+        ss.jobs_gen = g = g + 1
+        # 清理上一批 job 的对话历史
+        for k in [k for k in list(ss.keys()) if str(k).startswith(("chat_prompt_", "chat_image_", "chat_copies_"))]:
+            del ss[k]
+        ss.jobs = _build_jobs(selected_rows)
+        _submit_images(
+            [i for i, j in enumerate(ss.jobs) if not j.get("derived_from")],
+            [i for i, j in enumerate(ss.jobs) if j.get("derived_from")],
+        )
+with col_ref_info:
+    bits = []
+    if ss.ref_images:  # 老任务遗留的产品参考图（Step 0 上传位已移除，生图时仍生效）
+        bits.append("产品参考图")
+    if uploaded_styles or ss.get("_pending_style_images") or ss.style_images:
+        bits.append("风格参考图")
+    if uploaded_logos or ss.get("_pending_logo_images") or ss.logo_images:
+        bits.append("品牌 Logo")
+    if bits:
+        st.caption(f"已带 {' + '.join(bits)}，生图时会随提示词一并发给模型。")
+    elif selected_rows:
+        st.warning("⚠ 本任务未带任何参考图（风格图/Logo），将纯文生图。可回 Step 0 上传或「从历史图中选择」。")
 
 
 def make_prompt_feedback(i: int):
     def apply(feedback: str):
         job = ss.jobs[i]
         new = refine_via_llm(
-            f"AI 生图英文提示词（场景：{job['main_scene']} / {job['sub_scene']}，比例 {job['ratio']}）",
+            f"生图总提示词（场景：{job['main_scene']} / {job['sub_scene']}，比例 {job['ratio']}，渲染后直发生图模型）",
             {"image_prompt": job["image_prompt"]},
             f"chat_prompt_{g}_{i}",
             feedback,
@@ -649,7 +721,7 @@ def make_prompt_feedback(i: int):
 
 
 if ss.jobs:
-    st.caption("生图前可直接改提示词文本，或用对话框让 AI 按意见改。")
+    st.caption("每张图的最终提示词（场景变量已填入总提示词模板）可直接编辑或让 AI 修改，改后点对应图片的「重新生成这张」生效。")
     for i, job in enumerate(ss.jobs):
         if job.get("derived_from"):
             st.info(
@@ -657,23 +729,19 @@ if ss.jobs:
                 "内容与母版一致，无需单独提示词。"
             )
             continue
-        ss.jobs[i]["image_prompt"] = st.text_area(
-            f"{job['main_scene']} / {job['sub_scene']}（{job['ratio']}）",
-            value=job["image_prompt"],
-            height=160,
-            key=f"job_prompt_{tok}_{g}_{i}_v{job.get('rev', 0)}",
-        )
-        with st.expander("💬 让 AI 修改这条提示词", expanded=False):
+        with st.expander(f"📄 {job['main_scene']} / {job['sub_scene']}（{job['ratio']}）提示词", expanded=False):
+            ss.jobs[i]["image_prompt"] = st.text_area(
+                "最终提示词",
+                value=job["image_prompt"],
+                height=240,
+                key=f"job_prompt_{tok}_{g}_{i}_v{job.get('rev', 0)}",
+                label_visibility="collapsed",
+            )
             chat_box(
                 f"chat_prompt_{g}_{i}",
                 make_prompt_feedback(i),
-                placeholder="例：光线改成黄昏；标题更有冲击力；产品再突出一点…",
+                placeholder="例：光线改成黄昏；构图更聚焦人物；产品再突出一点…",
             )
-
-st.divider()
-
-# ---------------------------------------------------------------- Step 3 生图
-st.header("Step 3 · 生图")
 
 
 def _master_index(job: dict):
@@ -699,25 +767,6 @@ def _apply_new_image_ss(i: int, png: bytes):
                 other["has_prev"] = False
 
 
-def _submit_images(master_indices: list, derived_indices: list):
-    if uploaded_styles:
-        ss.style_images = runstate.save_ref_images(
-            ss.run_dir, [(f.name, f.getvalue()) for f in uploaded_styles],
-            dirname=runstate.STYLE_REFS_DIRNAME,
-        )
-    if uploaded_logos:
-        ss.logo_images = runstate.save_ref_images(
-            ss.run_dir, [(uploaded_logos.name, uploaded_logos.getvalue())],
-            dirname=runstate.LOGO_REFS_DIRNAME,
-        )
-    persist()
-    bg.submit_image_generation(
-        config, prompts, ss.run_dir, master_indices, derived_indices,
-        ss.ref_images, ss.style_images, ss.logo_images,
-    )
-    st.rerun()
-
-
 pending_masters = [
     i for i, j in enumerate(ss.jobs)
     if not j.get("derived_from") and j["image_prompt"] and not _has_image(j)
@@ -729,23 +778,10 @@ for i, j in enumerate(ss.jobs):
         if mi is not None and (_has_image(ss.jobs[mi]) or mi in pending_masters):
             pending_derived.append(i)
 
-col_gen, col_info = st.columns([1, 2])
-with col_gen:
-    pending_total = len(pending_masters) + len(pending_derived)
-    if st.button(f"🖼️ 生成待生成的 {pending_total} 张图（后台运行）", type="primary", disabled=not pending_total):
+pending_total = len(pending_masters) + len(pending_derived)
+if pending_total:
+    if st.button(f"🔁 补齐/重试待生成的 {pending_total} 张图（后台运行）"):
         _submit_images(pending_masters, pending_derived)
-with col_info:
-    bits = []
-    if ss.ref_images:  # 老任务遗留的产品参考图（Step 0 上传位已移除，生图时仍生效）
-        bits.append("产品参考图")
-    if uploaded_styles or ss.style_images:
-        bits.append("风格参考图")
-    if uploaded_logos or ss.logo_images:
-        bits.append("品牌 Logo")
-    if bits:
-        st.caption(f"已带 {' + '.join(bits)}，生图时会随提示词一并发给模型。")
-    elif pending_total:
-        st.warning("⚠ 本任务未带任何参考图（风格图/Logo），将纯文生图。可回 Step 0 上传或「从历史图中选择」。")
 
 
 def make_image_feedback(i: int):
@@ -815,8 +851,8 @@ if display:
 
 st.divider()
 
-# ---------------------------------------------------------------- Step 4 看图写文案
-st.header("Step 4 · 看图写文案")
+# ---------------------------------------------------------------- Step 3 看图写文案
+st.header("Step 3 · 看图写文案")
 need_copy = [i for i, j in enumerate(ss.jobs) if _has_image(j) and not j["copies"]]
 if st.button(
     f"🗒️ 为 {len(need_copy)} 张图生成文案（每张 {int(title_count)} 套，后台运行）",

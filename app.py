@@ -9,7 +9,7 @@ st.set_page_config(page_title="Meta 素材工厂", page_icon="🎨", layout="wid
 # 切页保活：带 key 的输入组件在「未被渲染的一次重跑」后会被 Streamlit 自动回收，
 # 导致切到别的页面再回来时 Step 0 填写的内容被清空。app.py 在每次重跑、进入任何
 # 页面之前都会执行，此处重新赋值可把这些 key 标记为用户状态，跳过组件回收。
-for _k in ("product_info", "ratio_choice", "title_count"):
+for _k in ("product_info", "brand_name", "ad_language", "ratio_choice", "title_count"):
     if _k in st.session_state:
         st.session_state[_k] = st.session_state[_k]
 

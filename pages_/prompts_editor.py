@@ -8,7 +8,7 @@ st.caption("模板中的 {变量名} 会在运行时自动替换，请保留需�
 
 prompts = load_prompts()
 
-MAIN_KEYS = ["scene_mining", "image_prompt_gen", "copywriting"]
+MAIN_KEYS = ["scene_mining", "image_gen", "copywriting"]
 BRANCH_KEYS = [k for k in prompts if k not in MAIN_KEYS]
 
 
@@ -37,7 +37,7 @@ def _editor(key: str, item: dict):
                 st.rerun()
 
 
-st.subheader("主流程：① 场景挖掘 → ② 生成生图提示词 → ③ 生图（直接用②的结果）→ ④ 看图写文案")
+st.subheader("主流程：① 场景挖掘 → ② 场景变量直填生图总提示词（原样直发生图模型）→ ③ 看图写文案")
 for key in MAIN_KEYS:
     _editor(key, prompts[key])
 

@@ -5,14 +5,14 @@
 ## 项目目标
 
 为 Meta（Facebook/Instagram）投放团队提供素材生产流水线工具：
-**产品信息 → AI 挖掘投放场景（主场景+细分场景，含海报文案与评分）→ 场景数据直连生图提示词模板 → 生图（1:1 / 4:5 / 双尺寸）→ AI 看图写多套标题文案并与图片绑定 → 导出交付包**。
+**产品信息（含品牌名/广告语言）→ AI 挖掘投放场景（主场景+细分场景，含评分）→ 场景变量直填「生图总提示词」模板 → 生图（1:1 / 4:5 / 双尺寸）→ AI 看图写多套标题文案并与图片绑定 → 导出交付包**。
 
 定位：**生产项目，长期维护**，不是一次性脚本。使用者为投放团队成员，本地运行。
 
 ## 技术架构
 
 - **形态**：Python 3.12 + Streamlit 本地 Web 应用（WSL 中运行，Windows 浏览器访问 localhost:8501）
-- **LLM**：Anthropic API（走中转站 `ai.deepthink.works`），负责挖场景、写生图提示词、看图写文案
+- **LLM**：Anthropic API（走中转站 `ai.deepthink.works`），负责挖场景、看图写文案、对话式修改（生图提示词由模板本地渲染，不经 Claude）
 - **生图**：OpenAI 兼容接口（走网关 `ai-gateway.deepthink.works/v1`），默认 `gpt-image-1`
 - **启动**：`~/venvs/meta-creative-tool/bin/streamlit run app.py`（venv 在 WSL 原生磁盘，见技术决策 8）
 
@@ -20,10 +20,10 @@
 
 | 路径 | 职责 |
 |------|------|
-| `app.py` | 入口，st.navigation 五页导航；含 Step0 输入 keep-alive（决策 17，切页不清空） |
-| `pages_/workflow.py` | 主工作流页（多任务工作台）：Step0 输入 → Step1 找场景 → Step2 生成生图提示词（场景变量→Claude）→ Step3 生图 → Step4 看图写文案 → 导出；侧边栏任务切换，耗时环节后台运行 |
+| `app.py` | 入口，st.navigation 五页导航；含 Step0 输入 keep-alive（决策 17，切页不清空，白名单含 brand_name/ad_language） |
+| `pages_/workflow.py` | 主工作流页（多任务工作台）：Step0 输入（产品信息/品牌名/广告语言/参考图/尺寸）→ Step1 找场景 → Step2 生图（场景变量本地直填「生图总提示词」模板，一键出图）→ Step3 看图写文案 → 导出；侧边栏任务切换，耗时环节后台运行 |
 | `core/runstate.py` | 每任务 state.json 读写（每 run 锁内读改写）、从 manifest 重建老任务、参考图/回退图文件管理 |
-| `core/tasks.py` | 后台任务执行器：进程级单例线程池 + 状态表，三条管线（批量提示词/生图/批量文案），结果经 runstate 逐条落盘 |
+| `core/tasks.py` | 后台任务执行器：进程级单例线程池 + 状态表，两条管线（生图/批量文案），结果经 runstate 逐条落盘；`new_job()` 供工作流页构建 job |
 | `pages_/settings.py` | 设置页：key（优先环境变量）、模型下拉框（API 实时拉取）、测试连接 |
 | `pages_/prompts_editor.py` | 提示词管理页：6 套提示词在线编辑/恢复默认，按 主流程（挖场景/生图/文案）与 分支（改尺寸/结果修改/图片修改）分组 |
 | `core/config.py` | config.json 读写；key 从环境变量兜底（`ENV_FALLBACK`） |
@@ -42,15 +42,15 @@
 
 - **config.json**：`anthropic_api_key / anthropic_base_url / claude_model / openai_api_key / openai_base_url / image_model`
 - **环境变量**：`ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / OPENAI_API_KEY / OPENAI_BASE_URL`（存于用户 WSL `~/.bashrc`，config.json 留空时生效）
-- **prompts.json**：6 个 key：`scene_mining / image_prompt_gen / copywriting / ratio_adapt / refine_text / image_refine`（主流程 3 + 分支 3；`image_style_template` 已于 2026-08-28 移除），各含 `name/description/variables/template`。`scene_mining` 变量为 `product_info + excluded_scenes`，返回 13 字段细分场景结构（audience/trigger/pain_or_desire/product_use/video_purpose/visual_brief/headline_angle/selling_point/headline/subheadline/cta/score_breakdown/total_score）；解析兼容旧版 name/description 结构。`image_prompt_gen` 为**提示词生成的元提示词**（10 个变量：product_info/main_scene/sub_scene/audience/selling_point/visual_brief/aspect_ratio/headline/subheadline/cta，全部来自场景挖掘输出），Claude 返回 `{"image_prompt": ...}`（英文海报提示词，广告文字原文引用）；生图环节直接发送该提示词，无风格外壳
+- **prompts.json**：6 个 key：`scene_mining / image_gen / copywriting / ratio_adapt / refine_text / image_refine`（主流程 3 + 分支 3；`image_prompt_gen` 已于 2026-09-01 经确认替换为 `image_gen`，`image_style_template` 已于 2026-08-28 移除），各含 `name/description/variables/template`。`scene_mining` 变量为 `product_info + excluded_scenes`，返回 6 字段细分场景结构（audience/trigger/pain_or_desire/product_use/score_breakdown/total_score，2026-09-01 起 visual_brief/headline_angle/video_purpose/selling_point/headline/subheadline/cta 经确认不再输出）；解析兼容旧版 name/description 结构。`image_gen` 为**直发生图模型的中文总提示词模板**（10 个变量：reference_style_image/main_scene/sub_scene/audience/trigger/pain_or_desire/product_use/aspect_ratio/ad_language/brand_name），场景变量在工作流页本地 render（不调 Claude），渲染结果即 job.image_prompt；`{reference_style_image}` 占位符保留到发送瞬间由生图管线按是否带风格图填充
 - **manifest.json**：`{product_info, updated_at, jobs: [{main_scene, sub_scene, sub_scene_desc, ratio, image_prompt, filename, image_path, copies, derived_from}]}`（`derived_from`：该图由哪张母版图改尺寸而来，普通图为空串）
-- **state.json**（每 run 目录一份）：工作流完整可恢复状态 `{product_info, ratio_choice, title_count, scenes, selected_scenes, jobs, jobs_gen, ref_images, style_images, logo_images, chats}`（`style_images`/`logo_images` 为 2026-08-28 经确认新增，老任务缺省视为空；`ref_images` key 保留但 Step0 产品参考图上传位已于 2026-08-31 移除——新任务恒为空，老任务遗留值生图时仍生效）；jobs 在 manifest 字段之外多 `rev/has_prev` 运行时字段。manifest 由 state 按字段白名单派生（`runstate.MANIFEST_JOB_KEYS`），协议不受影响
+- **state.json**（每 run 目录一份）：工作流完整可恢复状态 `{product_info, brand_name, ad_language, ratio_choice, title_count, scenes, selected_scenes, jobs, jobs_gen, ref_images, style_images, logo_images, chats}`（`brand_name`/`ad_language` 为 2026-09-01 经确认新增，老任务缺省视为空串；`style_images`/`logo_images` 为 2026-08-28 经确认新增，老任务缺省视为空；`ref_images` key 保留但 Step0 产品参考图上传位已于 2026-08-31 移除——新任务恒为空，老任务遗留值生图时仍生效）；jobs 在 manifest 字段之外多 `rev/has_prev` 运行时字段。manifest 由 state 按字段白名单派生（`runstate.MANIFEST_JOB_KEYS`），协议不受影响
 - **交付表.xlsx 列**：图片文件名 | 主场景 | 细分场景 | 尺寸 | 文案序号 | 角度 | 标题 Headline | 主文案 Primary Text | 生图提示词
-- **LLM 三个环节的 JSON 返回结构**：见 `core/prompts.py` 各模板内的格式约定（`scenes[] / image_prompt / copies[]`）
+- **LLM 两个环节的 JSON 返回结构**：见 `core/prompts.py` 各模板内的格式约定（`scenes[] / copies[]`；生图提示词自 2026-09-01 起为本地模板渲染，无 LLM JSON 环节）
 
 ## 已完成功能
 
-- [x] 四步工作流全流程（找场景→生成提示词→生图→文案→导出，分支：改尺寸/结果修改/图片修改），每步可人工编辑干预
+- [x] 工作流全流程（找场景→变量直填一键生图→文案→导出，分支：改尺寸/结果修改/图片修改），每步可人工编辑干预
 - [x] 尺寸选择：1:1 / 4:5 / 双尺寸；4:5 通过 1024×1536 生成后居中裁切 1024×1280 实现
 - [x] 双尺寸母版派生：先出 4:5 母版，再用「尺寸改版」提示词把成品改成内容一致的 1:1；母版重生成/被修改后派生图自动失效待重做
 - [x] 场景结果卡片式多选 UI（按主场景分组，点卡片勾选/取消细分场景）
@@ -58,9 +58,9 @@
 - [x] 生图并发：独立图全部并行提交、不设并发上限（限流交给 API 侧 + 重试退避），派生图依赖母版串行
 - [x] 图生图：参考图走 `images.edit`（产品参考图上传位已于 2026-08-31 经用户确认移除，老任务已保存的产品参考图生图时仍生效）
 - [x] 海报风格参考图 + 品牌 Logo：Step0 两个上传位（风格图/Logo；产品图上传位已移除），按任务落盘（`refs_style/`、`refs_logo/`）；生图时按「产品(老任务遗留)→风格→Logo」固定顺序传参考图，并在发送瞬间追加参考图身份英文说明（要求原样放 Logo、贴近风格图气质），job.image_prompt 本身不变
-- [x] Step0 输入切页不丢：keep-alive 保活（product_info/ratio_choice/title_count，决策 17）；参考图上传后立即落盘、任务未建时先暂存内存建任务后补存（暂存跨任务切换不清空）；上传框下方缩略图回显当前生效的图并支持单张删除（file_uploader 本体无法程序回填，属平台限制）
+- [x] Step0 输入切页不丢：keep-alive 保活（product_info/brand_name/ad_language/ratio_choice/title_count，决策 17）；参考图上传后立即落盘、任务未建时先暂存内存建任务后补存（暂存跨任务切换不清空）；上传框下方缩略图回显当前生效的图并支持单张删除（file_uploader 本体无法程序回填，属平台限制）
 - [x] 参考图历史库：上传的风格图/Logo 自动按内容去重收录进全局图库（`core/assets.py`），Step0 上传框下方「📚 从历史图选择」缩略图勾选后一键应用（整组替换，风格图多选/Logo 单选），可从库中删除；首次启用自动导入所有历史任务的参考图
-- [x] 场景库建任务自动继承参考图：勾场景创建生图任务时，自动复制同产品（product_info 全等）最近一个带风格图/Logo 任务的参考图；Step3 生图时任务不带任何参考图会显式警告「将纯文生图」
+- [x] 场景库建任务自动继承参考图与品牌名/广告语言：勾场景创建生图任务时，自动复制同产品（product_info 全等）最近一个带风格图/Logo 任务的参考图，并继承最近填过的 brand_name/ad_language；Step2 生图按钮旁任务不带任何参考图会显式警告「将纯文生图」
 - [x] 单张图重新生成
 - [x] 6 套提示词在线编辑/恢复默认（管理页按 主流程/分支功能 分组）
 - [x] key 环境变量方案 + 设置页不落盘 key
@@ -68,11 +68,11 @@
 - [x] 导出交付包（图片 + manifest.json + 交付表.xlsx）
 - [x] SQLite 索引库 + 历史素材页：manifest 落盘时双写入库，可按产品/场景搜索历史 run，支持全量重建导入老数据
 - [x] 多任务工作台：任务状态持久化（state.json），侧边栏新建/切换任务，历史页「载入到工作流继续编辑」（老 run 无 state.json 时从 manifest 重建）
-- [x] 后台任务：批量提示词 / 生图 / 批量文案 三个耗时环节后台线程运行，期间该任务页面锁定并轮询进度，可切到其它任务继续工作；结果逐条落盘，失败项列表展示可重试
-- [x] 场景挖掘提示词 V2：内部 30 候选去重评分后**全部输出**（2026-08-28 起取消 ≥90 分门槛，评分仅供筛选参考）、细分场景含海报文案字段（selling_point/headline/subheadline/cta）+ 五维评分、`excluded_scenes` 历史去重（自动取场景库同产品场景名）
+- [x] 后台任务：生图 / 批量文案 两个耗时环节后台线程运行（批量提示词管线已于 2026-09-01 随 V4 链路移除），期间该任务页面锁定并轮询进度，可切到其它任务继续工作；结果逐条落盘，失败项列表展示可「补齐/重试」
+- [x] 场景挖掘提示词 V3（2026-09-01）：内部 30 候选去重评分后**全部输出**（评分仅供筛选参考）、细分场景 6 字段（audience/trigger/pain_or_desire/product_use + 五维评分，海报文案与画面 brief 字段经确认移除）、`excluded_scenes` 历史去重（自动取场景库同产品场景名）
 - [x] Step1 场景结果筛选器：主场景多选 + 最低综合评分滑条，只影响卡片展示不影响勾选状态；无评分的老场景在分数筛选 >0 时被隐藏（与场景库页一致）
-- [x] 生图提示词生成（Step2）：场景挖掘的全部变量喂给 Claude 产出含广告语的英文海报提示词，可编辑/对话修改后再生图；生图直接发送该提示词（无风格外壳，`image_style_template` 已移除）
-- [x] 场景分类库：挖掘结果自动入库（scene_lib 表，产品+主场景+细分场景去重）；出图成功系统自动打 `has_image` 标签、`in_ads` 投放标签手动勾选；筛选器（关键词/产品/主场景/总分区间/出图/投放/排序）；局部删除；勾选场景一键创建独立生图任务（不影响运行中任务，直接从 Step 2 开始）。操作按钮（创建生图任务/删除）**常驻左侧边栏**（实时显示已选数量，滚动到哪都可点），页面底部保留一份
+- [x] 生图链路 V4（Step2，2026-09-01）：勾选场景一键生图——场景变量 + 品牌名/广告语言/比例 本地填入 `image_gen` 中文总提示词模板（不调 Claude），渲染结果即最终提示词直发生图模型；每张图提示词可展开编辑/对话修改后单张重生成；海报标题/副标题由生图模型按模板要求自行撰写
+- [x] 场景分类库：挖掘结果自动入库（scene_lib 表，产品+主场景+细分场景去重）；出图成功系统自动打 `has_image` 标签、`in_ads` 投放标签手动勾选；筛选器（关键词/产品/主场景/总分区间/出图/投放/排序）；局部删除；勾选场景一键创建独立生图任务（不影响运行中任务，进工作流直接点生图）。操作按钮（创建生图任务/删除）**常驻左侧边栏**（实时显示已选数量，滚动到哪都可点），页面底部保留一份
 - [x] 日志系统：`logs/app.log` 按天滚动，覆盖 Claude 调用（模型/耗时/拒绝/JSON 解析失败）、生图（重试/最终失败）、后台任务生命周期与失败项、SQLite 入库失败、state.json 读取失败
 - [x] 连通性测试全部通过（Claude 中转站 + 生图网关真实出图验证）
 
@@ -97,10 +97,10 @@
 12. **任务状态的权威数据是 state.json**：manifest.json 由它按白名单派生（协议不变），所有 state 写入必须走 `runstate.persist()/update()`（每 run 进程内锁），UI 与后台线程共用这把锁。**本任务后台运行期间 UI 不得 persist**（`persist()` 内已有 `bg.is_running` 守卫，不要绕过），否则会用旧内存副本覆盖后台结果。
 13. **后台任务模型**：`core/tasks.py` 模块级单例线程池（页面重跑不重建）；线程入参在主线程取好、线程内零 session_state；每 run 同时只跑一个后台任务（重复提交被拒绝）；UI 在任务运行时锁定该任务编辑区（`st.fragment(run_every=2s)` 轮询 + `st.stop()`），完成后从盘重载 state 收割。「后台」= 不阻塞页面、可切任务，Streamlit 进程关闭则任务终止（已完成子项已落盘）。
 14. **场景库（scene_lib 表）**：场景挖掘/对话修改成功后自动 upsert（唯一键 产品+主场景+细分场景），重复入库更新内容但**保留 has_image / in_ads 标签**；`has_image` 由前台 `_apply_new_image_ss` 和后台 `tasks._apply_image` 两条出图路径自动打标（按 产品+主/细分场景名匹配，失败只记日志）；`excluded_scenes` 按产品信息**全等匹配**取库内场景名（产品文案改字则匹配不到，已知取舍）。场景行新增 `detail` 字段存 9 字段完整结构（state.json 内部格式，非 manifest 协议）；老场景无 detail/分数，按分数筛选时会被过滤。
-15. **生图提示词链路（V3，2026-08-28 定稿）**：场景变量 →（`tasks._prompt_vars` 组装，老场景逐项回退 description/headline_angle）→ `image_prompt_gen` 元提示词 → Claude 产出英文海报提示词（广告文字原文引用）→ 生图模型**原样接收**（无风格外壳，`image_style_template` 已删除）。历史沿革：V1=LLM 生成+风格外壳；V2=模板直连无 LLM（当天被 V3 取代）。海报含文字（标题/CTA），生图模型渲染文字可能出现拼写错误，属模型能力边界。**例外（2026-08-28 经确认）**：任务带风格参考图或 Logo 时，`tasks._ref_bundle` 会在发送瞬间在提示词末尾追加一段参考图身份英文说明（不追加模型无法区分多张参考图各是什么）；只有产品参考图或无参考图时仍严格原样直发，job.image_prompt 任何情况下不被改写。Logo 由生图模型**重绘还原**而非像素级贴图，复杂小字 Logo 可能有细节偏差。
+15. **生图提示词链路（V4，2026-09-01 定稿）**：场景变量（audience/trigger/pain_or_desire/product_use，老场景 product_use 回退 description）+ 品牌名/广告语言/比例 →（`workflow._render_job_prompt` 本地 render，瞬时完成不调 Claude）→ `image_gen` 中文总提示词 → 生图模型**原样接收**。海报标题/副标题/CTA 由**生图模型**按模板第四节要求自行撰写（不再由 Claude 预写后原文引用——文字拼写错误概率高于 V3，且每次重生成文字可能不同，属本方案已知取舍）。历史沿革：V1=LLM 生成+风格外壳；V2=模板直连无 LLM（当天被 V3 取代）；V3=场景变量→Claude 写英文提示词→直发（2026-08-28~2026-09-01）。**发送瞬间的两个例外（job.image_prompt 任何情况下不被改写）**：①提示词中的 `{reference_style_image}` 占位符由 `tasks.submit_image_generation` 按当时是否带风格图填成中文说明文字；②任务带风格参考图或 Logo 时，`tasks._ref_bundle` 在末尾追加参考图身份英文说明（不追加模型无法区分多张参考图各是什么）；只有产品参考图或无参考图时不追加。Logo 由生图模型**重绘还原**而非像素级贴图，复杂小字 Logo 可能有细节偏差。
 16. **SQLite 是索引层，manifest.json 仍是权威数据**：`data/app.db`（已 gitignore）由 `store.save_manifest()` 双写产生，任何时候可用 `db.rebuild_from_outputs()` 从 outputs/ 全量重建（幂等：按 dir_name upsert run、整删整插 jobs）。入库失败**不得中断素材生产**（`sync_run_safe` 吞异常返回错误串）。改 db schema 无迁移负担——直接删库重建。若 /mnt/c 上 SQLite 出现锁异常/变慢，把 `DB_PATH` 迁到 WSL 原生盘。
-17. **Streamlit widget state 切页即回收，Step0 输入靠双保险**（2026-08-31）：带 `key` 的组件在「未被渲染的一次重跑」后 session_state 值被 Streamlit 自动清除（切页必触发）。①文本/选项类：`app.py` 在 `pg.run()` 前对白名单 key（`product_info/ratio_choice/title_count`）执行 `ss[k] = ss[k]` 保活——重新赋值把 key 标记为用户状态跳过回收，app.py 每次重跑必执行所以任何切页都保得住，**不要把这段循环移进页面脚本**（页面脚本切页时不执行，保活失效）。②file_uploader：内容无法程序回填（平台限制），采用「上传立即接管」——任务已建马上落盘，未建先暂存普通 session key（`_pending_style_images/_pending_logo_images`），建任务后下一次重跑自动补存；上传框下方缩略图回显+单张删除。指纹 key 在切换任务时清理（`_clear_chat_keys`），**暂存 key 不清**——未建任务时上传的图跟人走，载入/新建任务后自动存进该任务（2026-08-31 修复：原先切任务清暂存导致丢图）。
-18. **参考图默认按任务隔离，复用靠图库与继承**（2026-08-31）：任务的参考图仍是 run 目录内的私有副本（协议不变）；跨任务复用两条路——①全局参考图库 `data/ref_assets/{style,logo}`（`core/assets.py`，内容 sha256 前 12 位命名去重，首次用 `.backfilled` 标记文件做幂等历史导入），Step0 可视化勾选应用；②场景库建任务时自动继承同产品最近任务的参考图（product_info 全等匹配，与 excluded_scenes 同一取舍）。库与任务解耦：删库内图不影响任务，删任务不影响库。图库若变慢可整目录迁 WSL 原生盘（同决策 16 的 DB_PATH 思路）。
+17. **Streamlit widget state 切页即回收，Step0 输入靠双保险**（2026-08-31）：带 `key` 的组件在「未被渲染的一次重跑」后 session_state 值被 Streamlit 自动清除（切页必触发）。①文本/选项类：`app.py` 在 `pg.run()` 前对白名单 key（`product_info/brand_name/ad_language/ratio_choice/title_count`）执行 `ss[k] = ss[k]` 保活——重新赋值把 key 标记为用户状态跳过回收，app.py 每次重跑必执行所以任何切页都保得住，**不要把这段循环移进页面脚本**（页面脚本切页时不执行，保活失效）。②file_uploader：内容无法程序回填（平台限制），采用「上传立即接管」——任务已建马上落盘，未建先暂存普通 session key（`_pending_style_images/_pending_logo_images`），建任务后下一次重跑自动补存；上传框下方缩略图回显+单张删除。指纹 key 在切换任务时清理（`_clear_chat_keys`），**暂存 key 不清**——未建任务时上传的图跟人走，载入/新建任务后自动存进该任务（2026-08-31 修复：原先切任务清暂存导致丢图）。
+18. **参考图默认按任务隔离，复用靠图库与继承**（2026-08-31）：任务的参考图仍是 run 目录内的私有副本（协议不变）；跨任务复用两条路——①全局参考图库 `data/ref_assets/{style,logo}`（`core/assets.py`，内容 sha256 前 12 位命名去重，首次用 `.backfilled` 标记文件做幂等历史导入），Step0 可视化勾选应用；②场景库建任务时自动继承同产品最近任务的参考图（product_info 全等匹配，与 excluded_scenes 同一取舍；2026-09-01 起 brand_name/ad_language 同机制继承）。库与任务解耦：删库内图不影响任务，删任务不影响库。图库若变慢可整目录迁 WSL 原生盘（同决策 16 的 DB_PATH 思路）。
 
 ## 协作规范（Claude 必须遵守）
 
@@ -151,3 +151,4 @@
 - 2026-08-31：场景库操作按钮挪到侧边栏常驻——原先只在页面最底部，场景一多就找不到；「创建生图任务/删除」抽成公共渲染函数，侧边栏一份（实时显示已选数量）+ 底部保留一份，逻辑与协议均不变。
 - 2026-08-31：Step0 输入切页不丢 + 移除产品参考图上传位（决策 17）——app.py 加 keep-alive 白名单保活 product_info/ratio_choice/title_count；上传图未建任务时先暂存内存、建任务后自动落盘；风格图/Logo 上传框下方缩略图回显+单张删除。产品参考图上传位经用户确认删除（state.json 的 `ref_images` key 保留，老任务遗留值生图时仍生效，协议不变）。
 - 2026-08-31：文案环节提速——看图写文案由逐张串行改为全部并行（与生图同策略，`tasks.submit_copywriting`）；发给 Claude 的图片先压成 768px JPEG（新增 `llm.vision_image()`，对话改文案同样生效），原先 3 张图串行发原图 PNG 需 14 分钟。
+- 2026-09-01：生图链路 V4 + 场景挖掘 V3（决策 15 改版，均经用户确认）——①取消 Step2「Claude 生成提示词」环节：`image_prompt_gen` 替换为 `image_gen`（用户提供的中文生图总提示词，直发生图模型），场景变量+品牌名/广告语言/比例在工作流页本地 render，勾选场景一键生图（后台批量提示词管线删除，`tasks.new_job` 转为公共函数；生图=Step2、文案=Step3 重编号）；②scene_mining 精简为 6 字段（保留五维评分，visual_brief/headline_angle/video_purpose/selling_point/headline/subheadline/cta 移除），海报文字改由生图模型自行撰写；③Step0 新增 品牌名称/广告语言 输入（keep-alive 保活，state.json 经确认新增 `brand_name`/`ad_language` 两个 key），场景库建任务同机制继承；④`{reference_style_image}` 占位符与参考图身份说明均在发送瞬间处理，job.image_prompt 不被改写；prompts.json 已同步重生成。

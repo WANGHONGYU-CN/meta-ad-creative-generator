@@ -17,7 +17,7 @@ from core.prompts import render
 
 log = get_logger("tasks")
 
-KIND_LABELS = {"prompts": "批量生成提示词", "images": "生图", "copies": "批量生成文案"}
+KIND_LABELS = {"images": "生图", "copies": "批量生成文案"}
 
 _executor = ThreadPoolExecutor(max_workers=8)
 _status: dict = {}
@@ -110,25 +110,9 @@ def _apply_image(run_dir: Path, i: int, png: bytes, image_prompt=None) -> None:
         db.mark_scene_has_image(state.get("product_info", ""), jobs[i]["main_scene"], jobs[i]["sub_scene"])
 
 
-# ---------------------------------------------------------------- 三条管线
-def _prompt_vars(product_info: str, row: dict, ratio: str) -> dict:
-    """场景行 → 提示词生成模板的变量；老格式场景（无 detail）逐项回退。"""
-    d = row.get("detail") or {}
-    return {
-        "product_info": product_info,
-        "main_scene": row.get("main_scene", ""),
-        "sub_scene": row.get("sub_scene", ""),
-        "audience": d.get("audience", ""),
-        "selling_point": d.get("selling_point") or d.get("product_use") or row.get("description", ""),
-        "visual_brief": d.get("visual_brief") or row.get("description", ""),
-        "aspect_ratio": ratio,
-        "headline": d.get("headline") or d.get("headline_angle", ""),
-        "subheadline": d.get("subheadline", ""),
-        "cta": d.get("cta", ""),
-    }
-
-
-def _new_job(row: dict, ratio: str, image_prompt: str, filename: str, derived_from: str) -> dict:
+# ---------------------------------------------------------------- 两条管线
+def new_job(row: dict, ratio: str, image_prompt: str, filename: str, derived_from: str) -> dict:
+    """构造一个 job（一张图）。工作流页勾选场景后本地渲染「生图总提示词」时调用。"""
     return {
         "main_scene": row.get("main_scene", ""),
         "sub_scene": row.get("sub_scene", ""),
@@ -144,52 +128,18 @@ def _new_job(row: dict, ratio: str, image_prompt: str, filename: str, derived_fr
     }
 
 
-def submit_prompt_generation(config, prompts, run_dir, product_info, selected_rows, dual_mode, ratios) -> bool:
-    """Step 2：把场景挖掘的全部变量喂给 Claude，为每个选中场景批量生成海报生图提示词，
-    逐场景追加进 state["jobs"]。调用前 UI 须已把 state["jobs"] 清空并 persist。"""
-    tpl = prompts["image_prompt_gen"]["template"]
-    key = Path(run_dir).name
-
-    def work():
-        master_ratios = ["4:5"] if dual_mode else list(ratios)
-        total = len(selected_rows) * len(master_ratios)
-        _set(key, total=total, text="生成提示词…")
-        done = 0
-        for row in selected_rows:
-            master_filename = ""
-            new_jobs = []
-            for ratio in master_ratios:
-                done += 1
-                _set(key, done=done, text=f"生成提示词 {done}/{total}：{row['sub_scene']}（{ratio}）")
-                try:
-                    prompt = render(tpl, _prompt_vars(product_info, row, ratio))
-                    result = llm.call_json(config, prompt)
-                    image_prompt = result.get("image_prompt", "")
-                except Exception as e:  # noqa: BLE001
-                    _add_error(key, f"「{row['sub_scene']}（{ratio}）」提示词生成失败：{e}")
-                    image_prompt = ""
-                master_filename = store.image_filename(row["main_scene"], row["sub_scene"], ratio)
-                new_jobs.append(_new_job(row, ratio, image_prompt, master_filename, ""))
-            if dual_mode and master_filename:
-                new_jobs.append(
-                    _new_job(row, "1:1", "", store.image_filename(row["main_scene"], row["sub_scene"], "1:1"), master_filename)
-                )
-            runstate.update(run_dir, lambda s, nj=new_jobs: s["jobs"].extend(nj))
-
-    return _submit("prompts", run_dir, work)
-
-
 def _ref_bundle(run_dir, ref_rel_paths, style_rel_paths, logo_rel_paths) -> tuple:
     """按「产品图 → 风格图 → Logo」固定顺序组装参考图，并生成随提示词追加的英文说明。
 
-    只有产品参考图时不追加说明（保持决策 15 的原样直发）；出现风格图或 Logo 时
-    必须用说明告诉模型各张参考图的身份，否则模型无法区分。"""
+    返回 (images, note, has_style)。只有产品参考图时不追加说明（保持决策 15 的
+    原样直发）；出现风格图或 Logo 时必须用说明告诉模型各张参考图的身份，否则模型
+    无法区分。has_style 供生图管线在发送瞬间填充提示词里的 {reference_style_image}。"""
     product = runstate.load_ref_images(run_dir, ref_rel_paths)
     style = runstate.load_ref_images(run_dir, style_rel_paths)
     logo = runstate.load_ref_images(run_dir, logo_rel_paths)
     images = product + style + logo
     if not (style or logo):
-        return images, ""
+        return images, "", False
 
     def _rng(start: int, count: int) -> str:
         return f"image {start}" if count == 1 else f"images {start}-{start + count - 1}"
@@ -214,23 +164,32 @@ def _ref_bundle(run_dir, ref_rel_paths, style_rel_paths, logo_rel_paths) -> tupl
             "visible corner of the poster: legible, correct colors and proportions, not redrawn, distorted "
             "or recolored, with clean space around it. Do not invent any other logo."
         )
-    return images, "\n\n" + "\n".join(lines)
+    return images, "\n\n" + "\n".join(lines), bool(style)
 
 
 def submit_image_generation(
     config, prompts, run_dir, master_indices, derived_indices,
     ref_rel_paths, style_rel_paths=None, logo_rel_paths=None,
 ) -> bool:
-    """Step 3：母版并行生图（不设并发上限，决策 11），派生图依赖母版成品串行改尺寸。
-    job 的 image_prompt（Step 2 生成的海报提示词）即最终提示词，直接发给生图模型；
-    有风格/Logo 参考图时在发送瞬间追加参考图身份说明（job.image_prompt 本身不变）。"""
+    """Step 2 生图：母版并行生图（不设并发上限，决策 11），派生图依赖母版成品串行改尺寸。
+    job 的 image_prompt（场景变量填入「生图总提示词」的渲染结果）即最终提示词，直接发给
+    生图模型；发送瞬间做两件事、job.image_prompt 本身均不变：
+    ① 按当时是否带风格参考图填充提示词中的 {reference_style_image} 占位符；
+    ② 有风格/Logo 参考图时在末尾追加参考图身份英文说明（决策 15 例外条款）。"""
     adapt_tpl = prompts["ratio_adapt"]["template"]
     key = Path(run_dir).name
 
     def work():
         state = runstate.load(run_dir) or runstate.default_state()
         jobs = state.get("jobs", [])
-        ref_images, ref_note = _ref_bundle(run_dir, ref_rel_paths, style_rel_paths or [], logo_rel_paths or [])
+        ref_images, ref_note, has_style = _ref_bundle(
+            run_dir, ref_rel_paths, style_rel_paths or [], logo_rel_paths or []
+        )
+        style_txt = (
+            "已随本提示词一并附上参考风格图（各张参考图的身份见文末英文说明）"
+            if has_style
+            else "未提供（跳过参考风格分析，直接根据场景变量设计）"
+        )
         total = len(master_indices) + len(derived_indices)
         _set(key, total=total, text="生图中…")
         done = 0
@@ -238,7 +197,8 @@ def submit_image_generation(
         tasks = []
         for i in master_indices:
             job = jobs[i]
-            tasks.append((i, job["image_prompt"] + ref_note, job["ratio"]))
+            prompt = job["image_prompt"].replace("{reference_style_image}", style_txt) + ref_note
+            tasks.append((i, prompt, job["ratio"]))
         if tasks:
             with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
                 futures = {
@@ -280,7 +240,7 @@ def submit_image_generation(
 
 
 def submit_copywriting(config, prompts, run_dir, indices, title_count, product_info) -> bool:
-    """Step 4：对已出图的 job 看图写文案。每张图相互独立，全部并行提交
+    """Step 3：对已出图的 job 看图写文案。每张图相互独立，全部并行提交
     （与生图同策略，决策 11）；图片压缩后再发送（llm.vision_image），
     原先逐张串行 + 发原图 PNG，3 张图要 14 分钟（2026-08-28 实测）。"""
     tpl = prompts["copywriting"]["template"]
