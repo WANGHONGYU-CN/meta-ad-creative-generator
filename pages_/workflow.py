@@ -763,19 +763,22 @@ def _submit_images(master_indices: list, derived_indices: list):
 
 col_gen_all, col_ref_info = st.columns([1, 2])
 with col_gen_all:
-    if st.button(
-        f"🖼️ 为选中的 {len(selected_rows)} 个场景生成 {len(selected_rows) * len(ratios)} 张图（后台运行）",
-        type="primary",
-        disabled=not selected_rows,
-    ):
-        if bg.edits_running(tok):
+    # 按钮不按 selected_rows 禁用/计数：勾选发生在场景 fragment 内（只局部重跑），
+    # 本处代码只在整页重跑时执行，按旧数据禁用会导致「勾了场景按钮还是灰的」。
+    # 点击本身就会触发整页重跑，此刻 ss.selected_scenes 一定是最新的，点击时实时校验即可；
+    # 实时勾选数看 Step 1 底部的「已选 N 个 = 将生成 N 张图」提示。
+    if st.button("🖼️ 为已勾选的场景生成图（后台运行）", type="primary", disabled=not ss.scenes):
+        fresh_rows = [ss.scenes[i] for i in ss.selected_scenes if i < len(ss.scenes)]
+        if not fresh_rows:
+            st.warning("请先在 Step 1 勾选至少一个场景。")
+        elif bg.edits_running(tok):
             st.warning("有图片正在后台修改，请等修改完成后再生图。")
         else:
             ss.jobs_gen = g = g + 1
             # 清理上一批 job 的对话历史
             for k in [k for k in list(ss.keys()) if str(k).startswith(("chat_prompt_", "chat_image_", "chat_copies_"))]:
                 del ss[k]
-            ss.jobs = _build_jobs(selected_rows)
+            ss.jobs = _build_jobs(fresh_rows)
             _submit_images(
                 [i for i, j in enumerate(ss.jobs) if not j.get("derived_from")],
                 [i for i, j in enumerate(ss.jobs) if j.get("derived_from")],
