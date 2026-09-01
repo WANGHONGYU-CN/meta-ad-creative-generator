@@ -1,7 +1,32 @@
+# ---- 依赖 / 运行环境 ----
 .venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# ---- 密钥与本地配置（key 走环境变量，config.json 仅存本机） ----
 config.json
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# ---- 本地数据 / 生成素材 / 索引库 / 日志（用户数据不上传） ----
 outputs/
 data/
 logs/
-__pycache__/
-*.pyc
+
+# ---- 备份与临时文件 ----
+*.bak
+*.bak-*
+*.tmp
+
+# ---- Claude Code 会话目录与并行工作树（含整仓副本） ----
+.claude/
+
+# ---- IDE / 系统文件 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
