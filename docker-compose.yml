@@ -1,5 +1,7 @@
 # 本地开发数据库（第一阶段：数据库基座，见 CLAUDE.md）
 # 凭据不入库：复制 .env.example 为 .env.local 填好后再 `docker compose up -d`
+# name 固定项目名——卷/网络命名不随启动目录变（worktree 与主 checkout 共用同一套）
+name: meta-creative-tool
 services:
   db:
     image: postgres:17
