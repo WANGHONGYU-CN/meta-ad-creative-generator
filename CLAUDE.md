@@ -11,7 +11,7 @@
 
 ## 技术架构
 
-- **形态**：Python 3.12 + Streamlit 本地 Web 应用（WSL 中运行，Windows 浏览器访问 localhost:8501）；本分支（feature/web-rewrite）已完成 FastAPI + React 正式 Web 架构（阶段一 API 层 `server/` + 阶段二前端 `web/`，启动 `uvicorn server.main:app --port 8000` 后浏览器直接访问 8000 端口即 Web 界面；**必须单进程**，迁移期与 Streamlit 同一时间只开一边）
+- **形态**：FastAPI + React 正式 Web 架构（主形态，2026-09-03 合入 main）：API 层 `server/` + 前端 `web/`，启动 `uvicorn server.main:app --port 8000` 后浏览器访问 8000 端口即 Web 界面，**必须单进程**（不要加 --workers，进程内锁与线程池不支持多 worker）。Streamlit 版（app.py + pages_/，localhost:8501）**保留双轨运行**作为回滚兜底，两版共用同一套数据；同一时间只开一边（两个进程的任务锁不互通）。回滚锚点：标签 `v1-streamlit-final`（合并前的纯 Streamlit 版）
 - **LLM**：Anthropic API（走中转站 `ai.deepthink.works`），负责挖场景、看图写文案、对话式修改（生图提示词由模板本地渲染，不经 Claude）
 - **生图**：OpenAI 兼容接口（走网关 `ai-gateway.deepthink.works/v1`），默认 `gpt-image-1`
 - **启动**：`~/venvs/meta-creative-tool/bin/streamlit run app.py`（venv 在 WSL 原生磁盘，见技术决策 8）
@@ -88,7 +88,8 @@
 
 ## 当前开发计划
 
-- [ ] **Web 化阶段三**：用户双轨验收（Web 版走完整流程与 Streamlit 对照）后合并 main；确认稳定后移除 Streamlit 入口
+- [ ] Web 版稳定使用一段时间并经用户确认后，移除 Streamlit 入口（在那之前双轨保留，随时可回退）
+- [x] Web 化阶段三：2026-09-03 合并 main（标签 v2.0-web；回滚锚点 v1-streamlit-final）
 - [x] Web 化阶段二：React 前端（Vite + TS + AntD，交互重新设计非复刻），构建产物 web/dist 由 FastAPI 托管
 - [ ] 非 OpenAI 系生图模型的尺寸适配（seedream 原生支持 4:5、gemini-image 参数不同），换模型前需适配；gpt-image-2 已于 2026-09-03 适配（决策 2）
 - [ ] 待用户提出
