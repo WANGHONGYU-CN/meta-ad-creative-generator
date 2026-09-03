@@ -1,7 +1,11 @@
 """gpt-image 生图封装：支持产品参考图（图生图）、1:1 / 4:5 两种比例。
 
-gpt-image-1 原生尺寸只有 1024x1024 / 1024x1536 / 1536x1024，不支持 4:5。
-4:5 的做法：按 1024x1536 竖版生成，再居中裁切为 1024x1280（恰好 4:5）。
+4:5 的实现按模型分两条路（`ratio_spec()`，2026-09-03 适配）：
+- gpt-image-2 系：支持任意 16 倍数自定义分辨率（比例 1:3~3:1），直接按
+  1024x1280 原生生成，不裁切——模型构图时知道真实画幅，海报文字不会被切掉；
+- 其它模型（gpt-image-1 等）：原生只有 1024x1024 / 1024x1536 / 1536x1024，
+  按 1024x1536 竖版生成后居中裁切为 1024x1280（恰好 4:5），画面上下各损失
+  128px，提示词需自带安全区约束。
 """
 import base64
 import io
@@ -14,11 +18,24 @@ from core.logger import get_logger
 
 log = get_logger("imagen")
 
-# 比例 -> (API 请求尺寸, 裁切目标尺寸或 None)
+# 比例 -> (API 请求尺寸, 裁切目标尺寸或 None)——不支持自定义分辨率的模型走这套
 RATIO_SPECS = {
     "1:1": ("1024x1024", None),
     "4:5": ("1024x1536", (1024, 1280)),
 }
+
+# 模型名含这些关键字 = 支持任意自定义分辨率（16 的倍数、比例 1:3~3:1），4:5 原生出图
+CUSTOM_SIZE_MODELS = ("gpt-image-2",)
+NATIVE_45_SPEC = ("1024x1280", None)
+
+
+def ratio_spec(model: str, ratio: str) -> tuple:
+    """按模型返回 (API 请求尺寸, 裁切目标或 None)。未知比例抛 ValueError。"""
+    if ratio not in RATIO_SPECS:
+        raise ValueError(f"不支持的比例：{ratio}")
+    if ratio == "4:5" and any(k in (model or "").lower() for k in CUSTOM_SIZE_MODELS):
+        return NATIVE_45_SPEC
+    return RATIO_SPECS[ratio]
 
 
 def get_client(config: dict) -> OpenAI:
@@ -52,9 +69,7 @@ def generate_image(
 
     reference_images: [(filename, bytes, mime_type), ...]，提供时走图生图（images.edit）。
     """
-    if ratio not in RATIO_SPECS:
-        raise ValueError(f"不支持的比例：{ratio}")
-    size, crop_target = RATIO_SPECS[ratio]
+    size, crop_target = ratio_spec(config["image_model"], ratio)
     client = get_client(config)
 
     mode = "图生图" if reference_images else "文生图"
@@ -106,9 +121,7 @@ def edit_image(
     与 generate_image 的区别：输入是成品图本身而非产品参考图，用于
     「4:5 母版改 1:1」和「图片对话式修改」两个场景。
     """
-    if ratio not in RATIO_SPECS:
-        raise ValueError(f"不支持的比例：{ratio}")
-    size, crop_target = RATIO_SPECS[ratio]
+    size, crop_target = ratio_spec(config["image_model"], ratio)
     client = get_client(config)
 
     t0 = time.monotonic()
