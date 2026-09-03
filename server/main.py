@@ -15,6 +15,7 @@
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from core import assets
@@ -60,7 +61,15 @@ def _startup():
 app.mount("/files/outputs", StaticFiles(directory=OUTPUTS_DIR, check_dir=False), name="outputs")
 app.mount("/files/assets", StaticFiles(directory=assets.ASSETS_DIR, check_dir=False), name="assets")
 
-# 前端构建产物（阶段二产出 web/dist 后生效）
+# 前端构建产物（web/dist，阶段二产出）：静态资源直出 + SPA 回退——
+# /scenes 等前端路由刷新时也要回到 index.html，由前端路由接管
 _dist = PROJECT_ROOT / "web" / "dist"
 if _dist.is_dir():
-    app.mount("/", StaticFiles(directory=_dist, html=True), name="web")
+    app.mount("/assets", StaticFiles(directory=_dist / "assets", check_dir=False), name="web-assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str):
+        f = (_dist / path).resolve()
+        if path and f.is_file() and f.is_relative_to(_dist.resolve()):
+            return FileResponse(f)
+        return FileResponse(_dist / "index.html")

@@ -11,7 +11,7 @@
 
 ## 技术架构
 
-- **形态**：Python 3.12 + Streamlit 本地 Web 应用（WSL 中运行，Windows 浏览器访问 localhost:8501）；本分支（feature/web-rewrite）正迁移为 FastAPI + React 正式 Web 架构，阶段一 API 层已完成（`server/`，启动 `uvicorn server.main:app --port 8000`，**必须单进程**，迁移期与 Streamlit 同一时间只开一边）
+- **形态**：Python 3.12 + Streamlit 本地 Web 应用（WSL 中运行，Windows 浏览器访问 localhost:8501）；本分支（feature/web-rewrite）已完成 FastAPI + React 正式 Web 架构（阶段一 API 层 `server/` + 阶段二前端 `web/`，启动 `uvicorn server.main:app --port 8000` 后浏览器直接访问 8000 端口即 Web 界面；**必须单进程**，迁移期与 Streamlit 同一时间只开一边）
 - **LLM**：Anthropic API（走中转站 `ai.deepthink.works`），负责挖场景、看图写文案、对话式修改（生图提示词由模板本地渲染，不经 Claude）
 - **生图**：OpenAI 兼容接口（走网关 `ai-gateway.deepthink.works/v1`），默认 `gpt-image-1`
 - **启动**：`~/venvs/meta-creative-tool/bin/streamlit run app.py`（venv 在 WSL 原生磁盘，见技术决策 8）
@@ -43,6 +43,7 @@
 | `server/services/mining.py` | 场景挖掘后台通道（API 版）：线程池 + 状态表，与 core/tasks.py 管线互斥，轮询语义与生图管线一致 |
 | `server/services/scene_lib.py` | 场景库建任务 + 同产品参考图/品牌名继承（从 pages_/scene_library.py 抽取） |
 | `server/deps.py` | 路由公共件：run 名校验（防路径穿越）、state 读取、文件 URL 拼装（image_url 带 rev 缓存戳）、组合状态轮询 |
+| `web/` | React 前端（Vite + TypeScript + Ant Design v5）：`src/api/`（请求封装/类型/轮询与后台收割 hooks）、`src/layout/AppShell`（侧边导航+顶栏任务切换）、`src/pages/Workspace/`（分步面板：产品信息/场景/图片/文案导出）、`src/pages/`（场景库/历史/提示词/设置）、`src/components/ChatDrawer`（通用 AI 修改对话）。构建产物 `web/dist` **有意入库**（pull 即用无需 Node）；`web/node_modules` 是指向 WSL 原生盘的符号链接（决策 8 同理），已 gitignore |
 
 ## 数据与接口协议（未经确认不得变更）
 
@@ -87,8 +88,8 @@
 
 ## 当前开发计划
 
-- [ ] **Web 化阶段二（本分支）**：React 前端（Vite + TypeScript + Ant Design），五个页面按现有交互复刻，构建产物放 web/dist 由 FastAPI 托管
-- [ ] Web 化阶段三：双轨验收后移除 Streamlit 入口，更新启动方式文档
+- [ ] **Web 化阶段三**：用户双轨验收（Web 版走完整流程与 Streamlit 对照）后合并 main；确认稳定后移除 Streamlit 入口
+- [x] Web 化阶段二：React 前端（Vite + TS + AntD，交互重新设计非复刻），构建产物 web/dist 由 FastAPI 托管
 - [ ] 非 OpenAI 系生图模型的尺寸适配（seedream 原生支持 4:5、gemini-image 参数不同），换模型前需适配
 - [ ] 待用户提出
 
@@ -165,4 +166,5 @@
 - 2026-08-31：文案环节提速——看图写文案由逐张串行改为全部并行（与生图同策略，`tasks.submit_copywriting`）；发给 Claude 的图片先压成 768px JPEG（新增 `llm.vision_image()`，对话改文案同样生效），原先 3 张图串行发原图 PNG 需 14 分钟。
 - 2026-09-01：体验四连改（决策 19 + 决策 12 补充，经用户确认）——①图片对话修改由前台同步（一次只能改一张、整页转圈）改为后台并发通道 `tasks.submit_image_edit`，多张图同时改、只锁被改的卡片；②图片版本历史（`images/.hist/`，上限 10 版）：上一版/下一版 + 历史缩略图任意回跳，老 `.prev` 回退图自动收编；③Step1 场景精简模式（默认开，每组评分前 30%、至少 2 个、已勾选恒显示）；④点击提速：勾选等高频操作改脏标记延迟落盘（关键节点 + 15 秒兜底），场景卡片区改 st.fragment 局部重跑——此前每次点击三连写 /mnt/c 慢盘 + 整页双重跑是延迟主因。
 - 2026-09-01：生图链路 V4 + 场景挖掘 V3（决策 15 改版，均经用户确认）——①取消 Step2「Claude 生成提示词」环节：`image_prompt_gen` 替换为 `image_gen`（用户提供的中文生图总提示词，直发生图模型），场景变量+品牌名/广告语言/比例在工作流页本地 render，勾选场景一键生图（后台批量提示词管线删除，`tasks.new_job` 转为公共函数；生图=Step2、文案=Step3 重编号）；②scene_mining 精简为 6 字段（保留五维评分，visual_brief/headline_angle/video_purpose/selling_point/headline/subheadline/cta 移除），海报文字改由生图模型自行撰写；③Step0 新增 品牌名称/广告语言 输入（keep-alive 保活，state.json 经确认新增 `brand_name`/`ad_language` 两个 key），场景库建任务同机制继承；④`{reference_style_image}` 占位符与参考图身份说明均在发送瞬间处理，job.image_prompt 不被改写；prompts.json 已同步重生成。
+- 2026-09-03（feature/web-rewrite 分支）：Web 化阶段二——React 前端 `web/`（Vite + TypeScript + Ant Design v5），交互按正式产品重新设计（经用户确认「不复刻、要优质交互与简约 UI」）：全局左侧图标导航 + 顶栏任务切换（替代 Streamlit 分页）；工作台改分步面板（产品信息→场景→图片→文案导出，可点击步骤条）；场景区评分徽章卡片 + 筛选工具条 + 底部悬浮操作栏（精简模式默认开）；图片区画廊卡片（重生成/后台并发修改/提示词编辑/版本历史胶片弹窗），后台任务不锁页面（进度横幅 + 2.5s 轮询 + 自动收割 ack）；文案区行内可编辑 + AI 整批修改；导出新增浏览器直接下载 交付包.zip。所有 AI 对话修改统一右侧抽屉（ChatDrawer），历史存 state.json chats 与 Streamlit 互通。FastAPI 增加 SPA 回退路由（刷新前端路由不 404，含路径穿越防护）。web/dist 有意入库、web/node_modules 符号链接到 WSL 原生盘（决策 8 同理）。
 - 2026-09-03（feature/web-rewrite 分支）：Web 化阶段一——新增 FastAPI API 层 `server/`（经用户确认的迁移方案：FastAPI + React 前后端分离，core/ 原样复用只重写 UI 层）。pages_/workflow.py 与 scene_library.py 的业务逻辑抽取为 `server/services/`（原页面文件未动，Streamlit 版照常可用）；五个页面的全部操作暴露为 REST 接口（文档 /docs），图片走 /files 静态直出；挖场景在 API 版为后台线程 + 轮询（`services/mining.py`，与生图/文案管线互斥）；对话历史直接存 state.json 的 chats key（沿用 chat_* 命名，与 Streamlit 版互通）；导出新增 交付包.zip 下载接口。数据协议全部未变。真机验收：结构接口全通 + 真实场景挖掘（claude-opus-5，41 场景，249s）落盘/入库/继承链路全通。注意：**uvicorn 必须单进程**；迁移期 Streamlit 与 API 同一时间只开一边（进程内锁不互通）。
