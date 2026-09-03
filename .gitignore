@@ -4,6 +4,9 @@ venv/
 __pycache__/
 *.pyc
 *.pyo
+# 前端依赖（实际是指向 WSL 原生盘的符号链接，见 README「Web 版」）；
+# web/dist 构建产物**有意入库**——团队成员 pull 后无需装 Node 即可用 Web 版
+web/node_modules
 
 # ---- 密钥与本地配置（key 走环境变量，config.json 仅存本机） ----
 config.json
@@ -30,3 +33,4 @@ logs/
 .vscode/
 .DS_Store
 Thumbs.db
+web/tsconfig.tsbuildinfo
