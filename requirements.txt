@@ -3,3 +3,7 @@ anthropic>=1.0
 openai>=1.60
 pillow>=10.0
 openpyxl>=3.1
+# Web API（server/，迁移期与 Streamlit 双轨并存）
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9

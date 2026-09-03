@@ -16,6 +16,17 @@ cd /mnt/c/Users/yueg0/meta-creative-tool
 
 > 依赖 venv 放在 WSL 原生磁盘（`~/venvs/meta-creative-tool`）而不是项目目录——项目在 C 盘（9p 文件系统），venv 放这里冷启动要 35 秒+，放 WSL 侧只要 1 秒。重装依赖：`~/venvs/meta-creative-tool/bin/pip install -r requirements.txt`。
 
+### Web 版（本分支开发中，阶段一：API）
+
+Streamlit 之外新增了正式 Web 架构（FastAPI 后端 + React 前端，前端在阶段二）。API 服务与 Streamlit 版共用同一套数据（outputs/、data/、config.json、prompts.json）：
+
+```bash
+cd /mnt/c/Users/yueg0/meta-creative-tool
+~/venvs/meta-creative-tool/bin/uvicorn server.main:app --port 8000
+```
+
+浏览器打开 http://localhost:8000/docs 查看/调试全部接口。**必须单进程**（不要加 `--workers`），且迁移期同一时间只开 Streamlit 或 API 其中一边（两个进程的任务锁不互通）。
+
 ## 第一次使用
 
 1. 进「🔑 设置」页，填入 Anthropic API Key（文字环节）和 OpenAI API Key（生图），点保存 → 测试连接
