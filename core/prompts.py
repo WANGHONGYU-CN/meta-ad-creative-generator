@@ -1,13 +1,11 @@
-"""6 套提示词模板的默认值、读写与变量渲染。
+"""6 套提示词模板的读写与变量渲染（2A 起存储在 PostgreSQL）。
 
-模板中的变量写作 {variable_name}，渲染时逐个字符串替换（不用 str.format，
-这样模板里可以放 JSON 示例的花括号而不需要转义）。
+- 当前生效版在 prompt_templates 表（管理页编辑对象），出厂基线在 prompt_defaults 表；
+  「恢复默认」= reset_prompt() 把 prompt_defaults 对应行整行拷回。运行时不再读写 prompts.json。
+- DEFAULT_PROMPTS 常量仅作历史 seed 数据源保留（0002 migration 已内嵌一份副本），运行时不引用。
+- 模板中的变量写作 {variable_name}，渲染时逐个字符串替换（不用 str.format，
+  这样模板里可以放 JSON 示例的花括号而不需要转义）。
 """
-import json
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PROMPTS_PATH = PROJECT_ROOT / "prompts.json"
 
 DEFAULT_PROMPTS = {
     "scene_mining": {
@@ -752,23 +750,73 @@ Absolutely no text, no letters, no watermark, no logo overlays, no borders in th
 }
 
 
+def _session():
+    # 惰性 import：import 本模块不要求数据库环境就绪（如只取 DEFAULT_PROMPTS 的脚本）
+    from server.db.session import get_session_factory
+
+    return get_session_factory()()
+
+
+def _as_dict(row) -> dict:
+    return {
+        "name": row.name,
+        "description": row.description,
+        "variables": list(row.variables or []),
+        "template": row.template,
+    }
+
+
 def load_prompts() -> dict:
-    prompts = json.loads(json.dumps(DEFAULT_PROMPTS, ensure_ascii=False))
-    if PROMPTS_PATH.exists():
-        try:
-            saved = json.loads(PROMPTS_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            saved = {}
-        for key, item in saved.items():
-            if key in prompts and isinstance(item, dict) and item.get("template"):
-                prompts[key]["template"] = item["template"]
-    return prompts
+    """全部提示词（当前生效版），结构与旧版一致：{key: {name, description, variables, template}}。"""
+    from sqlalchemy import select
+
+    from server.db.models import PromptTemplate
+
+    with _session() as session:
+        rows = session.execute(
+            select(PromptTemplate).order_by(PromptTemplate.id)
+        ).scalars().all()
+        return {row.key: _as_dict(row) for row in rows}
 
 
 def save_prompts(prompts: dict) -> None:
-    PROMPTS_PATH.write_text(
-        json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    """按 key 覆盖 template（与旧版 prompts.json 语义一致：可变量只有 template）。"""
+    from sqlalchemy import select
+
+    from server.db.models import PromptTemplate
+
+    with _session() as session:
+        for row in session.execute(select(PromptTemplate)).scalars():
+            item = prompts.get(row.key)
+            if isinstance(item, dict) and item.get("template"):
+                row.template = item["template"]
+        session.commit()
+
+
+def reset_prompt(key: str) -> dict | None:
+    """恢复出厂默认：prompt_defaults 对应行整行拷回 prompt_templates。key 无出厂值返回 None。"""
+    from sqlalchemy import select
+
+    from server.db.models import PromptDefault, PromptTemplate
+
+    with _session() as session:
+        default = session.execute(
+            select(PromptDefault).where(PromptDefault.key == key)
+        ).scalar_one_or_none()
+        if default is None:
+            return None
+        row = session.execute(
+            select(PromptTemplate).where(PromptTemplate.key == key)
+        ).scalar_one_or_none()
+        if row is None:
+            row = PromptTemplate(key=key)
+            session.add(row)
+        row.name = default.name
+        row.description = default.description
+        row.variables = list(default.variables or [])
+        row.template = default.template
+        session.commit()
+        return _as_dict(row)
 
 
 def render(template: str, variables: dict) -> str:
