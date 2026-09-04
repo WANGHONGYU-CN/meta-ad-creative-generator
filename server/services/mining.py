@@ -1,17 +1,19 @@
 """场景挖掘后台执行（API 层专用）。
 
-Streamlit 版挖场景是前台同步转圈（1-3 分钟）；Web 版改为后台线程 + 轮询，
-浏览器不用挂一个长请求。状态表独立于 core/tasks.py 的管线状态（挖掘发生在
-生图之前，二者互斥由路由层检查），结果经 runstate.update 锁内落盘。
+后台线程 + 轮询，浏览器不用挂长请求。状态表独立于 core/tasks.py 的管线状态
+（挖掘发生在生图之前，二者互斥由路由层检查），结果经 state_store 落库（PostgreSQL）。
+excluded_scenes 按 product_id 精确取场景库（不再靠 product_info 全文匹配）。
 """
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from core import db, llm, runstate
+from core import llm
 from core.logger import get_logger
 from core.prompts import render
 
+from server.services import scene_lib_store
+from server.services import state_store as st
 from server.services import workflow as wf
 
 log = get_logger("mining")
@@ -62,11 +64,11 @@ def submit(config: dict, prompts: dict, run_dir: Path) -> bool:
     def work():
         log.info("场景挖掘开始 run=%s", key)
         try:
-            state = runstate.load(run_dir) or runstate.default_state()
+            state = st.load(run_dir) or {}
             product_info = state.get("product_info", "")
             if not product_info.strip():
                 raise ValueError("产品信息为空，请先填写")
-            excluded = db.excluded_scene_names(product_info)
+            excluded = scene_lib_store.excluded_scene_names(state["product_id"])
             prompt = render(
                 prompts["scene_mining"]["template"],
                 {
@@ -78,15 +80,8 @@ def submit(config: dict, prompts: dict, run_dir: Path) -> bool:
             rows = wf.scene_rows_from_result(result)
             if not rows:
                 raise ValueError("模型返回的场景列表为空")
-
-            def mut(s):
-                s["scenes"] = rows
-                s["selected_scenes"] = []
-                s["jobs"] = []
-                (s.get("chats") or {}).pop("chat_scenes", None)
-
-            runstate.update(run_dir, mut)
-            db.upsert_scene_rows_safe(product_info, key, rows)
+            st.replace_scenes(run_dir, rows, clear_jobs=True, clear_scene_chat=True)
+            scene_lib_store.upsert_scenes_safe(state["product_id"], st.parse_run_name(key), rows)
             _finish("finished", count=len(rows))
             log.info("场景挖掘完成 run=%s 场景数=%d", key, len(rows))
         except Exception as e:  # noqa: BLE001 —— 后台线程不得抛出到无人处

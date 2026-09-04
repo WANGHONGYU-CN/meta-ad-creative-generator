@@ -1,11 +1,11 @@
 // 工作台：任务制分步面板（产品信息 → 场景 → 图片 → 文案与导出）。
 // 后台任务不锁页面：顶部横幅显示进度，完成后 useHarvest 自动收割刷新。
 import { BulbOutlined, FileImageOutlined, FormOutlined, InboxOutlined, RocketOutlined } from '@ant-design/icons'
-import { Alert, App, Button, Card, Empty, Progress, Skeleton, Steps, Typography } from 'antd'
+import { Alert, Button, Card, Empty, Progress, Skeleton, Steps, Typography } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
 
-import { api } from '../../api/client'
 import { useHarvest, useRunBundle } from '../../api/hooks'
+import NewTaskModal from '../../components/NewTaskModal'
 import { useCurrentTask } from '../../store/task'
 import StepCopies from './StepCopies'
 import StepImages from './StepImages'
@@ -13,10 +13,10 @@ import StepInput from './StepInput'
 import StepScenes from './StepScenes'
 
 export default function WorkspacePage() {
-  const { currentRun, setCurrentRun } = useCurrentTask()
+  const { currentRun } = useCurrentTask()
   const { data: bundle, isLoading, error } = useRunBundle(currentRun)
   const [step, setStep] = useState(0)
-  const { message } = App.useApp()
+  const [newTaskOpen, setNewTaskOpen] = useState(false)
   useHarvest(currentRun, bundle)
 
   // 切任务时按数据进度定位到最远的一步
@@ -42,16 +42,10 @@ export default function WorkspacePage() {
           <Typography.Paragraph type="secondary">
             从顶栏选择一个已有任务，或新建一个开始做素材。
           </Typography.Paragraph>
-          <Button
-            type="primary"
-            onClick={async () => {
-              const res = await api.createRun({})
-              setCurrentRun(res.name)
-              message.success('已创建新任务')
-            }}
-          >
+          <Button type="primary" onClick={() => setNewTaskOpen(true)}>
             新建任务
           </Button>
+          <NewTaskModal open={newTaskOpen} onClose={() => setNewTaskOpen(false)} />
         </Empty>
       </Card>
     )

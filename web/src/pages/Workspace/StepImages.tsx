@@ -80,7 +80,6 @@ export default function StepImages({ run, bundle, onToCopies }: {
   onToCopies: () => void
 }) {
   const s = bundle.state
-  const g = s.jobs_gen
   const qc = useQueryClient()
   const { message } = App.useApp()
   const [chatIdx, setChatIdx] = useState<number | null>(null)
@@ -143,7 +142,7 @@ export default function StepImages({ run, bundle, onToCopies }: {
           const editing = editingSet.has(i)
           const master = derived ? masterOf(job) : undefined
           return (
-            <Col key={`${g}-${i}`} xs={24} sm={12} xl={8}>
+            <Col key={i} xs={24} sm={12} xl={8}>
               <Card
                 size="small"
                 title={
@@ -245,7 +244,7 @@ export default function StepImages({ run, bundle, onToCopies }: {
           onClose={() => setChatIdx(null)}
           title={`修改图片 · ${s.jobs[chatIdx].sub_scene}（${s.jobs[chatIdx].ratio}）`}
           subtitle="在当前图基础上按意见重绘（后台运行，多张图可同时改）；历史版本随时可回跳。"
-          history={s.chats[`chat_image_${g}_${chatIdx}`] ?? []}
+          history={s.chats[`chat_image_${chatIdx}`] ?? []}
           placeholder="例：背景换成海边；把产品放大一点；整体调亮…"
           onSend={async (fb) => {
             await api.editImage(run, chatIdx, fb)
@@ -282,7 +281,7 @@ export default function StepImages({ run, bundle, onToCopies }: {
           </Button>
           <Typography.Title level={5} style={{ marginTop: 20 }}>让 AI 修改提示词</Typography.Title>
           <ChatPanel
-            history={s.chats[`chat_prompt_${g}_${promptIdx}`] ?? []}
+            history={s.chats[`chat_prompt_${promptIdx}`] ?? []}
             placeholder="例：光线改成黄昏；构图更聚焦人物；产品再突出一点…"
             maxHeight={260}
             onSend={async (fb) => {

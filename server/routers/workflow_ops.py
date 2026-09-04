@@ -7,7 +7,6 @@
 """
 from fastapi import APIRouter, HTTPException
 
-from core import runstate
 from core import tasks as bg
 from core.config import load_config
 from core.prompts import load_prompts
@@ -15,6 +14,7 @@ from core.prompts import load_prompts
 from server import deps
 from server.schemas import CopiesStart, Feedback, GotoVersion, JobPatch
 from server.services import mining
+from server.services import state_store as st
 from server.services import workflow as wf
 
 router = APIRouter(prefix="/api/runs/{run}", tags=["workflow"])
@@ -119,18 +119,11 @@ def patch_job(run: str, i: int, body: JobPatch):
     fields = body.model_dump(exclude_none=True)
     if not fields:
         raise HTTPException(400, "没有要修改的字段")
-
-    def mut(state):
-        jobs = state.get("jobs", [])
-        if i < len(jobs):
-            job = jobs[i]
-            if "image_prompt" in fields:
-                job["image_prompt"] = str(fields["image_prompt"])
-            if "copies" in fields:
-                job["copies"] = fields["copies"]
-            job["rev"] = job.get("rev", 0) + 1
-
-    state = runstate.update(run_dir, mut)
+    state = st.update_job(
+        run_dir, i,
+        image_prompt=fields.get("image_prompt"),
+        copies=fields.get("copies"),
+    )
     return {"job": deps.enrich_state(run, state)["jobs"][i]}
 
 

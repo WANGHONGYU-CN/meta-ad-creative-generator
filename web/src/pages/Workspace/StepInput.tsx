@@ -218,7 +218,7 @@ export default function StepInput({ run, bundle, onMined }: {
   return (
     <Row gutter={20}>
       <Col span={14}>
-        <Card title="产品信息">
+        <Card title={`产品信息 · ${s.product_name || '未命名产品'}`}>
           <Space direction="vertical" size={14} style={{ width: '100%' }}>
             <Input.TextArea
               rows={5}

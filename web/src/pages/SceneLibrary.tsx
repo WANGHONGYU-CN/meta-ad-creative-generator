@@ -33,7 +33,7 @@ export default function SceneLibraryPage() {
   const { setCurrentRun } = useCurrentTask()
 
   const [keyword, setKeyword] = useState('')
-  const [product, setProduct] = useState('')
+  const [productId, setProductId] = useState<number | null>(null)
   const [mains, setMains] = useState<string[]>([])
   const [useScore, setUseScore] = useState(false)
   const [scoreRange, setScoreRange] = useState<[number, number]>([90, 100])
@@ -44,14 +44,14 @@ export default function SceneLibraryPage() {
 
   const { data: products } = useQuery({ queryKey: ['sceneLibProducts'], queryFn: api.sceneLibProducts })
   const { data: mainOptions } = useQuery({
-    queryKey: ['sceneLibMains', product],
-    queryFn: () => api.sceneLibMainScenes(product),
+    queryKey: ['sceneLibMains', productId],
+    queryFn: () => api.sceneLibMainScenes(productId),
   })
 
   const params = useMemo(() => {
     const p = new URLSearchParams()
     if (keyword.trim()) p.set('keyword', keyword.trim())
-    if (product) p.set('product', product)
+    if (productId != null) p.set('product_id', String(productId))
     mains.forEach((m) => p.append('main_scene', m))
     if (useScore) {
       p.set('score_min', String(scoreRange[0]))
@@ -61,7 +61,7 @@ export default function SceneLibraryPage() {
     if (adsFilter !== '全部') p.set('in_ads', adsFilter === '投放中' ? 'true' : 'false')
     p.set('order', order)
     return p
-  }, [keyword, product, mains, useScore, scoreRange, imgFilter, adsFilter, order])
+  }, [keyword, productId, mains, useScore, scoreRange, imgFilter, adsFilter, order])
 
   const { data: rows, refetch } = useQuery({
     queryKey: ['sceneLib', params.toString()],
@@ -111,10 +111,12 @@ export default function SceneLibraryPage() {
             placeholder="产品（全部）"
             allowClear
             style={{ minWidth: 220, maxWidth: 340 }}
-            options={(products ?? []).map((p) => ({ value: p, label: p.slice(0, 40) + (p.length > 40 ? '…' : '') }))}
-            value={product || undefined}
+            options={(products ?? []).map((p) => ({ value: p.id, label: p.name, title: `${p.name} ${p.info}` }))}
+            value={productId ?? undefined}
+            optionFilterProp="title"
+            showSearch
             onChange={(v) => {
-              setProduct(v ?? '')
+              setProductId(v ?? null)
               setMains([])
             }}
           />

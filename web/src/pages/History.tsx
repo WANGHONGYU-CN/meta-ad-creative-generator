@@ -1,5 +1,6 @@
 // 历史素材：检索所有 run，浏览图片/提示词/文案，一键载入工作台继续编辑。
-import { ReloadOutlined, RightCircleOutlined, SearchOutlined } from '@ant-design/icons'
+// 数据直接来自 PostgreSQL（实时），无需索引重建。
+import { RightCircleOutlined, SearchOutlined } from '@ant-design/icons'
 import { App, Button, Card, Collapse, Empty, Flex, Image, Input, Popover, Tag, Typography } from 'antd'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -63,7 +64,7 @@ export default function HistoryPage() {
   const nav = useNavigate()
   const { setCurrentRun } = useCurrentTask()
 
-  const { data: runs, refetch } = useQuery({
+  const { data: runs } = useQuery({
     queryKey: ['history', query],
     queryFn: () => api.historyRuns(query),
   })
@@ -81,21 +82,10 @@ export default function HistoryPage() {
           style={{ maxWidth: 420 }}
         />
         <Button onClick={() => setQuery(keyword.trim())}>搜索</Button>
-        <div style={{ flex: 1 }} />
-        <Button
-          icon={<ReloadOutlined />}
-          onClick={async () => {
-            const res = await api.rebuildIndex()
-            message.success(`已导入 ${res.imported} 个 run${res.errors.length ? `，${res.errors.length} 个失败` : ''}`)
-            void refetch()
-          }}
-        >
-          重建索引
-        </Button>
       </Flex>
 
       {!runs?.length ? (
-        <Empty description="暂无记录。完成一次工作流后自动入库；老数据可点「重建索引」导入。" style={{ marginTop: 60 }} />
+        <Empty description="暂无记录。完成一次工作流后这里会自动出现。" style={{ marginTop: 60 }} />
       ) : (
         <Collapse
           items={runs.map((r) => ({

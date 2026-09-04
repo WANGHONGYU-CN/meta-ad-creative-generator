@@ -3,12 +3,12 @@ import {
   AppstoreOutlined, ClockCircleOutlined, FileTextOutlined, LoadingOutlined,
   PictureOutlined, PlusOutlined, SettingOutlined, ThunderboltFilled,
 } from '@ant-design/icons'
-import { App, Button, Layout, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
-import { useMemo } from 'react'
+import { Button, Layout, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
+import { useMemo, useState } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 
-import { api } from '../api/client'
 import { useRuns } from '../api/hooks'
+import NewTaskModal from '../components/NewTaskModal'
 import { useCurrentTask } from '../store/task'
 
 const { Sider, Header, Content } = Layout
@@ -26,7 +26,7 @@ export default function AppShell() {
   const { pathname } = useLocation()
   const { currentRun, setCurrentRun } = useCurrentTask()
   const { data: runs } = useRuns()
-  const { message } = App.useApp()
+  const [newTaskOpen, setNewTaskOpen] = useState(false)
 
   const options = useMemo(
     () =>
@@ -45,13 +45,6 @@ export default function AppShell() {
   )
 
   const busyCount = (runs ?? []).filter((r) => r.busy).length
-
-  const newTask = async () => {
-    const res = await api.createRun({})
-    setCurrentRun(res.name)
-    message.success('已创建新任务')
-    nav('/')
-  }
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -89,9 +82,10 @@ export default function AppShell() {
             optionFilterProp="title"
             popupMatchSelectWidth={false}
           />
-          <Tooltip title="新建一个空白任务">
-            <Button icon={<PlusOutlined />} onClick={newTask}>新任务</Button>
+          <Tooltip title="选择/新建产品后创建任务">
+            <Button icon={<PlusOutlined />} onClick={() => setNewTaskOpen(true)}>新任务</Button>
           </Tooltip>
+          <NewTaskModal open={newTaskOpen} onClose={() => setNewTaskOpen(false)} />
           <div style={{ flex: 1 }} />
           {busyCount > 0 && (
             <Tag icon={<LoadingOutlined />} color="processing">
