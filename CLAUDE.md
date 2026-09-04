@@ -11,56 +11,49 @@
 
 ## 技术架构
 
-- **形态**：FastAPI + React 正式 Web 架构（主形态，2026-09-03 合入 main）：API 层 `server/` + 前端 `web/`，启动 `uvicorn server.main:app --port 8000` 后浏览器访问 8000 端口即 Web 界面，**必须单进程**（不要加 --workers，进程内锁与线程池不支持多 worker）。Streamlit 版（app.py + pages_/，localhost:8501）**保留双轨运行**作为回滚兜底，两版共用同一套数据；同一时间只开一边（两个进程的任务锁不互通）。回滚锚点：标签 `v1-streamlit-final`（合并前的纯 Streamlit 版）
+- **形态**：FastAPI + React Web 应用：API 层 `server/` + 前端 `web/`，启动 `uvicorn server.main:app --port 8000` 后浏览器访问 8000 端口，**必须单进程**（不要加 --workers，进程内锁与线程池不支持多 worker）。Streamlit 版已于 2026-09-04 随数据层切 PostgreSQL 移除（历史回滚锚点：标签 `v1-streamlit-final`）
+- **数据层**：PostgreSQL 17 + SQLAlchemy 2.x + Alembic + psycopg（决策 20）。本地 `docker compose up -d` 起库（凭据在 `.env.local`，gitignore），`alembic upgrade head` 建表并 seed 出厂提示词；连接串只从环境变量 `DATABASE_URL` 读（缺失明确报错）。图片二进制在 `outputs/run_{id}/`，库存相对路径
 - **LLM**：Anthropic API（走中转站 `ai.deepthink.works`），负责挖场景、看图写文案、对话式修改（生图提示词由模板本地渲染，不经 Claude）
 - **生图**：OpenAI 兼容接口（走网关 `ai-gateway.deepthink.works/v1`），默认 `gpt-image-1`
-- **启动**：`~/venvs/meta-creative-tool/bin/streamlit run app.py`（venv 在 WSL 原生磁盘，见技术决策 8）
+- **启动**：`~/venvs/meta-creative-tool/bin/uvicorn server.main:app --port 8000`（venv 在 WSL 原生磁盘，见技术决策 8）
 
 ## 模块说明
 
 | 路径 | 职责 |
 |------|------|
-| `app.py` | 入口，st.navigation 五页导航；含 Step0 输入 keep-alive（决策 17，切页不清空，白名单含 brand_name/ad_language） |
-| `pages_/workflow.py` | 主工作流页（多任务工作台）：Step0 输入（产品信息/品牌名/广告语言/参考图/尺寸）→ Step1 找场景 → Step2 生图（场景变量本地直填「生图总提示词」模板，一键出图）→ Step3 看图写文案 → 导出；侧边栏任务切换，耗时环节后台运行 |
-| `core/runstate.py` | 每任务 state.json 读写（每 run 锁内读改写）、从 manifest 重建老任务、参考图/回退图文件管理 |
-| `core/tasks.py` | 后台任务执行器：进程级单例线程池 + 状态表，两条管线（生图/批量文案）+ 单张图片并发修改通道（`submit_image_edit`，与管线互斥），结果经 runstate 逐条落盘；`new_job()` 供工作流页构建 job |
-| `pages_/settings.py` | 设置页：key（优先环境变量）、模型下拉框（API 实时拉取）、测试连接 |
-| `pages_/prompts_editor.py` | 提示词管理页：6 套提示词在线编辑/恢复默认，按 主流程（挖场景/生图/文案）与 分支（改尺寸/结果修改/图片修改）分组 |
-| `core/config.py` | config.json 读写；key 从环境变量兜底（`ENV_FALLBACK`） |
-| `core/prompts.py` | 6 套默认提示词、prompts.json 读写、`render()` 变量替换（手动 replace，不用 str.format） |
+| `server/main.py` | Web API 入口（FastAPI）：CORS、七组路由、/files 静态文件（outputs 与参考图库）、web/dist 托管前端构建产物 |
+| `server/routers/` | 路由层：products（产品 CRUD）、runs（任务列表/新建/读取/字段修改/状态轮询/导出）、workflow_ops（挖场景/生图/图片修改与版本/文案/各处对话修改）、refs（参考图+图库）、prompts_admin、settings_admin、library（历史+场景库） |
+| `server/services/state_store.py` | **PostgreSQL 任务状态仓库**（决策 20）：state bundle 组装（对外交换格式）+ 全部写操作（每 run 进程内锁保「文件↔库」一致）+ 图片版本链 + 任务参考图 + 对话 + 产品/run CRUD + 同产品继承查询 |
+| `server/services/scene_lib_store.py` | 场景库 PG 仓库：upsert（唯一键冲突更新内容、保留 has_image/in_ads 标签）、筛选查询、excluded_scene_names（按 product_id 精确取）、出图自动打标 |
+| `server/services/workflow.py` | 工作流业务逻辑：提示词渲染、build_jobs、refine 系列、生图/文案提交、版本回跳、导出 zip（manifest 现场生成） |
+| `server/services/mining.py` | 场景挖掘后台通道：线程池 + 状态表，与 core/tasks.py 管线互斥，轮询语义与生图管线一致 |
+| `server/services/scene_lib.py` | 场景库建任务 + 同产品参考图/品牌名继承 |
+| `server/deps.py` | 路由公共件：run 名（`run_{id}`）校验、bundle 读取、文件 URL 拼装（image_url 带 rev 缓存戳）、组合状态轮询 |
+| `server/db/` | 数据层基座：`base.py`（Base+约束命名约定）、`session.py`（DATABASE_URL 仅环境变量）、`models/` 12 张表 |
+| `alembic/` + `alembic.ini` | 迁移：0001 建表、0002 内嵌 6 套出厂提示词 seed（新环境 `alembic upgrade head` 即完整可用） |
+| `docker-compose.yml` + `.env.example` | 本地 PostgreSQL 17（命名卷，项目名固定 meta-creative-tool）；凭据走 `.env.local`（gitignore） |
+| `core/tasks.py` | 后台任务执行器：进程级单例线程池 + 状态表，两条管线（生图/批量文案）+ 单张图片并发修改通道（`submit_image_edit`，与管线互斥），结果经 state_store 逐条落库；`new_job()` 构建 job dict |
+| `core/prompts.py` | 提示词读写（prompt_templates / prompt_defaults 表）、`reset_prompt()` 恢复出厂、`render()` 变量替换（手动 replace，不用 str.format） |
 | `core/llm.py` | Claude 封装：`call_json()`（含看图）、`list_models()`、`test_connection()`、JSON 解析容错 |
-| `core/imagen.py` | 生图封装：`generate_image()`（文生图/图生图）、`edit_image()`（成品图编辑：尺寸改版/按意见修改）、4:5 裁切、`list_models()`（关键词筛生图模型） |
-| `core/assets.py` | 全局参考图库（data/ref_assets/{style,logo}，gitignore）：上传时按内容 sha256 去重收录、首次自动导入历史任务参考图、Step0「从历史图选择」数据源；删库内图不影响任务（任务持有自己的副本） |
-| `core/store.py` | 落盘：run 目录、图片命名、manifest.json（同步写 SQLite 索引）、交付表.xlsx 导出 |
-| `core/logger.py` | 统一日志：`logs/app.log` 按天滚动保留 14 天（gitignore）；llm/imagen/tasks/db/runstate 均已埋点，日志自身故障降级为丢弃不影响主流程 |
-| `core/db.py` | SQLite 索引层（data/app.db）：runs/jobs/copies 三表、`sync_run_safe()` 双写、`list_runs()` 检索、`rebuild_from_outputs()` 全量重建 |
-| `pages_/history.py` | 历史素材页：搜索/浏览所有 run（图片、提示词、文案），含重建索引按钮、载入到工作流 |
-| `pages_/scene_library.py` | 场景库页：历史场景汇总，筛选器（关键词/产品/主场景/总分/出图/投放）、手动投放标签、删除、勾选场景创建新生图任务 |
-| `scripts/rebuild_db.py` | 命令行全量重建索引库（首次迁移历史数据 / 库损坏修复） |
-| `server/main.py` | Web API 入口（FastAPI）：CORS、六组路由、/files 静态文件（outputs 与参考图库）、web/dist 存在时托管前端构建产物 |
-| `server/routers/` | 路由层：runs（任务 CRUD/状态/导出）、workflow_ops（挖场景/生图/图片修改与版本/文案/各处对话修改）、refs（参考图+图库）、prompts_admin、settings_admin、library（历史+场景库） |
-| `server/services/workflow.py` | 工作流业务逻辑（从 pages_/workflow.py 抽取，无 UI 依赖）：提示词渲染、build_jobs、refine 系列、生图/文案提交、版本回跳、导出 zip；状态修改全走 runstate.update 锁内字段级读改写 |
-| `server/services/mining.py` | 场景挖掘后台通道（API 版）：线程池 + 状态表，与 core/tasks.py 管线互斥，轮询语义与生图管线一致 |
-| `server/services/scene_lib.py` | 场景库建任务 + 同产品参考图/品牌名继承（从 pages_/scene_library.py 抽取） |
-| `server/deps.py` | 路由公共件：run 名校验（防路径穿越）、state 读取、文件 URL 拼装（image_url 带 rev 缓存戳）、组合状态轮询 |
-| `web/` | React 前端（Vite + TypeScript + Ant Design v5）：`src/api/`（请求封装/类型/轮询与后台收割 hooks）、`src/layout/AppShell`（侧边导航+顶栏任务切换）、`src/pages/Workspace/`（分步面板：产品信息/场景/图片/文案导出）、`src/pages/`（场景库/历史/提示词/设置）、`src/components/ChatDrawer`（通用 AI 修改对话）。构建产物 `web/dist` **有意入库**（pull 即用无需 Node）；`web/node_modules` 是指向 WSL 原生盘的符号链接（决策 8 同理），已 gitignore |
-| `server/db/` | PostgreSQL 数据层基座（决策 20，第一阶段未接业务）：`base.py` Base+约束命名约定、`session.py` engine/Session（DATABASE_URL 仅环境变量，缺失报错）、`models/` 12 张表 |
-| `alembic/` + `alembic.ini` | 数据库迁移：0001 建表（autogenerate 打底人工校订）、0002 内嵌 6 套出厂提示词 seed（新环境 upgrade head 即完整可用） |
-| `docker-compose.yml` + `.env.example` | 本地 PostgreSQL 17（命名卷，不 bind /mnt/c）；凭据走 `.env.local`（gitignore），仓库只留 example |
-| `scripts/import_prompts_json.py` | 一次性脚本：本机 prompts.json 改过的模板导入 prompt_templates（只覆盖 template，与旧 load_prompts 语义一致） |
+| `core/imagen.py` | 生图封装：`generate_image()`（文生图/图生图）、`edit_image()`（成品图编辑：尺寸改版/按意见修改）、4:5 模型级尺寸适配、`list_models()` |
+| `core/assets.py` | 全局参考图库：文件在 data/ref_assets/{style,logo}（gitignore），元数据在 ref_assets 表（内容 sha256 去重）；删库内图不影响任务（任务持有私有副本） |
+| `core/store.py` | 文件落盘工具：图片命名/写盘、交付表.xlsx 导出 |
+| `core/config.py` | config.json 读写；key 从环境变量兜底（`ENV_FALLBACK`） |
+| `core/logger.py` | 统一日志：`logs/app.log` 按天滚动保留 14 天（gitignore）；llm/imagen/tasks/state_store 等均有埋点 |
+| `web/` | React 前端（Vite + TypeScript + AntD v5）：`src/api/`（请求封装/类型/轮询与收割 hooks）、`src/layout/AppShell` + `src/components/NewTaskModal`（选/建产品建任务）、`src/pages/Workspace/` 分步面板、场景库/历史/提示词/设置页、`ChatDrawer` 通用 AI 修改对话。构建产物 `web/dist` **有意入库**（pull 即用无需 Node）；`web/node_modules` 是指向 WSL 原生盘的符号链接（决策 8 同理），已 gitignore |
 
 ## 数据与接口协议（未经确认不得变更）
 
+- **PostgreSQL 12 张表**（`server/db/models/`，改 schema 必须走 Alembic migration，禁止直接 ALTER）：products / runs / scenes / jobs / image_versions / copies / ref_assets / run_ref_images / scene_lib / chat_messages / prompt_templates / prompt_defaults。运行时权威数据在库；图片二进制在 `outputs/run_{id}/`（主图 `images/<文件名>`、版本链 `images/.hist/<文件名>/v{seq}.png`、参考图 `refs_style/`、`refs_logo/`），库存相对路径
+- **run 对外标识** = 目录名 `run_{id}`（runs.id）。API 的 state bundle 交换格式（`state_store._load_in_session`）：`{product_id, product_name, product_info, brand_name, ad_language, ratio_choice, title_count, scenes, selected_scenes, jobs, ref_images(恒空,兼容字段), style_images, logo_images, chats}`；jobs 项含 `main_scene/sub_scene/sub_scene_desc/ratio/image_prompt/filename/image_path/copies/derived_from/rev/hist/hist_idx`；chats key = `chat_scenes` / `chat_prompt_{i}` / `chat_image_{i}` / `chat_copies_{i}`（i 为 job seq，无批次号——重建 jobs 时对话随外键级联清理）
 - **config.json**：`anthropic_api_key / anthropic_base_url / claude_model / openai_api_key / openai_base_url / image_model`
-- **环境变量**：`ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / OPENAI_API_KEY / OPENAI_BASE_URL`（存于用户 WSL `~/.bashrc`，config.json 留空时生效）
-- **prompts.json**：6 个 key：`scene_mining / image_gen / copywriting / ratio_adapt / refine_text / image_refine`（主流程 3 + 分支 3；`image_prompt_gen` 已于 2026-09-01 经确认替换为 `image_gen`，`image_style_template` 已于 2026-08-28 移除），各含 `name/description/variables/template`。`scene_mining` 变量为 `product_info + excluded_scenes`，返回 6 字段细分场景结构（audience/trigger/pain_or_desire/product_use/score_breakdown/total_score，2026-09-01 起 visual_brief/headline_angle/video_purpose/selling_point/headline/subheadline/cta 经确认不再输出）；解析兼容旧版 name/description 结构。`image_gen` 为**直发生图模型的中文总提示词模板**（10 个变量：reference_style_image/main_scene/sub_scene/audience/trigger/pain_or_desire/product_use/aspect_ratio/ad_language/brand_name），场景变量在工作流页本地 render（不调 Claude），渲染结果即 job.image_prompt；`{reference_style_image}` 占位符保留到发送瞬间由生图管线按是否带风格图填充
-- **manifest.json**：`{product_info, updated_at, jobs: [{main_scene, sub_scene, sub_scene_desc, ratio, image_prompt, filename, image_path, copies, derived_from}]}`（`derived_from`：该图由哪张母版图改尺寸而来，普通图为空串）
-- **state.json**（每 run 目录一份）：工作流完整可恢复状态 `{product_info, brand_name, ad_language, ratio_choice, title_count, scenes, selected_scenes, jobs, jobs_gen, ref_images, style_images, logo_images, chats}`（`brand_name`/`ad_language` 为 2026-09-01 经确认新增，老任务缺省视为空串；`style_images`/`logo_images` 为 2026-08-28 经确认新增，老任务缺省视为空；`ref_images` key 保留但 Step0 产品参考图上传位已于 2026-08-31 移除——新任务恒为空，老任务遗留值生图时仍生效）；jobs 在 manifest 字段之外多 `rev/has_prev/hist/hist_idx/hist_seq` 运行时字段（后三个为 2026-09-01 图片版本历史新增）。manifest 由 state 按字段白名单派生（`runstate.MANIFEST_JOB_KEYS`），协议不受影响
-- **交付表.xlsx 列**：图片文件名 | 主场景 | 细分场景 | 尺寸 | 文案序号 | 角度 | 标题 Headline | 主文案 Primary Text | 生图提示词
-- **LLM 两个环节的 JSON 返回结构**：见 `core/prompts.py` 各模板内的格式约定（`scenes[] / copies[]`；生图提示词自 2026-09-01 起为本地模板渲染，无 LLM JSON 环节）
+- **环境变量**：`ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / OPENAI_API_KEY / OPENAI_BASE_URL / DATABASE_URL`（存于用户 WSL `~/.bashrc`，API key 在 config.json 留空时生效；`DATABASE_URL` 必配，代码无带密码 fallback）
+- **提示词**：6 个 key：`scene_mining / image_gen / copywriting / ratio_adapt / refine_text / image_refine`（主流程 3 + 分支 3），存 prompt_templates（当前生效版）/ prompt_defaults（出厂基线），各含 name/description/variables/template。`scene_mining` 变量为 `product_info + excluded_scenes`，返回 6 字段细分场景结构（audience/trigger/pain_or_desire/product_use/score_breakdown/total_score）；`image_gen` 为**直发生图模型的中文总提示词模板**（10 个变量：reference_style_image/main_scene/sub_scene/audience/trigger/pain_or_desire/product_use/aspect_ratio/ad_language/brand_name），场景变量本地 render（不调 Claude），渲染结果即 job.image_prompt；`{reference_style_image}` 占位符保留到发送瞬间由生图管线按是否带风格图填充
+- **导出交付包协议（对外交付物）**：zip 内 图片 + manifest.json + 交付表.xlsx。manifest.json 由库内数据**导出时现场生成**：`{product_info, updated_at, jobs: [{main_scene, sub_scene, sub_scene_desc, ratio, image_prompt, filename, image_path, copies, derived_from}]}`（字段与历史版本一致）。交付表.xlsx 列：图片文件名 | 主场景 | 细分场景 | 尺寸 | 文案序号 | 角度 | 标题 Headline | 主文案 Primary Text | 生图提示词
 
 ## 已完成功能
 
+- [x] **数据层 PostgreSQL 化（决策 20，2026-09-03/04 两阶段完成）**：12 张表 + Alembic 迁移（0001 建表 / 0002 出厂提示词 seed）；提示词/任务/场景/图片记录/文案/对话/参考图元数据/场景库全部入库；产品升一等实体（选/建产品建任务，品牌名/广告语言默认值挂产品）；run 目录改 `outputs/run_{id}`；manifest.json 仅导出时现场生成；state.json / SQLite(app.db) / prompts.json / Streamlit 入口全部退役
 - [x] 工作流全流程（找场景→变量直填一键生图→文案→导出，分支：改尺寸/结果修改/图片修改），每步可人工编辑干预
 - [x] 尺寸选择：1:1 / 4:5 / 双尺寸；4:5 通过 1024×1536 生成后居中裁切 1024×1280 实现
 - [x] 双尺寸母版派生：先出 4:5 母版，再用「尺寸改版」提示词把成品改成内容一致的 1:1；母版重生成/被修改后派生图自动失效待重做
@@ -92,12 +85,13 @@
 
 ## 当前开发计划
 
-- [ ] Web 版稳定使用一段时间并经用户确认后，移除 Streamlit 入口（在那之前双轨保留，随时可回退）
+- [x] 移除 Streamlit 入口：2026-09-04 随数据层切 PostgreSQL 完成（app.py / pages_/ / .streamlit / core/runstate.py / core/db.py / prompts.json / scripts 已删除）
 - [x] Web 化阶段三：2026-09-03 合并 main（标签 v2.0-web；回滚锚点 v1-streamlit-final）
 - [x] Web 化阶段二：React 前端（Vite + TS + AntD，交互重新设计非复刻），构建产物 web/dist 由 FastAPI 托管
 - [ ] 非 OpenAI 系生图模型的尺寸适配（seedream 原生支持 4:5、gemini-image 参数不同），换模型前需适配；gpt-image-2 已于 2026-09-03 适配（决策 2）
 - [x] PostgreSQL 数据层第一阶段（基座）：2026-09-03 完成（feature/db-postgres，决策 20）——建库/迁移/seed/验收，未接业务
-- [ ] PostgreSQL 数据层第二阶段：业务读写从 state.json/SQLite 切到 PG（切换完成后 state.json、manifest 落盘、data/app.db、prompts.json 废弃，Streamlit 版随之退役；manifest.json 仅保留为导出交付包内由 DB 现场生成的文件，协议不变）
+- [x] PostgreSQL 数据层第二阶段（业务切库）：2026-09-04 完成，TestClient 全链路冒烟通过
+- [ ] 服务器部署（uvicorn + PG 上服务器、pg_dump 备份计划、凭据注入方式），待用户提出时间表
 - [ ] 待用户提出
 
 ## 重要技术决策
@@ -121,7 +115,7 @@
 17. **Streamlit widget state 切页即回收，Step0 输入靠双保险**（2026-08-31）：带 `key` 的组件在「未被渲染的一次重跑」后 session_state 值被 Streamlit 自动清除（切页必触发）。①文本/选项类：`app.py` 在 `pg.run()` 前对白名单 key（`product_info/brand_name/ad_language/ratio_choice/title_count`）执行 `ss[k] = ss[k]` 保活——重新赋值把 key 标记为用户状态跳过回收，app.py 每次重跑必执行所以任何切页都保得住，**不要把这段循环移进页面脚本**（页面脚本切页时不执行，保活失效）。②file_uploader：内容无法程序回填（平台限制），采用「上传立即接管」——任务已建马上落盘，未建先暂存普通 session key（`_pending_style_images/_pending_logo_images`），建任务后下一次重跑自动补存；上传框下方缩略图回显+单张删除。指纹 key 在切换任务时清理（`_clear_chat_keys`），**暂存 key 不清**——未建任务时上传的图跟人走，载入/新建任务后自动存进该任务（2026-08-31 修复：原先切任务清暂存导致丢图）。
 18. **参考图默认按任务隔离，复用靠图库与继承**（2026-08-31）：任务的参考图仍是 run 目录内的私有副本（协议不变）；跨任务复用两条路——①全局参考图库 `data/ref_assets/{style,logo}`（`core/assets.py`，内容 sha256 前 12 位命名去重，首次用 `.backfilled` 标记文件做幂等历史导入），Step0 可视化勾选应用；②场景库建任务时自动继承同产品最近任务的参考图（product_info 全等匹配，与 excluded_scenes 同一取舍；2026-09-01 起 brand_name/ad_language 同机制继承）。库与任务解耦：删库内图不影响任务，删任务不影响库。图库若变慢可整目录迁 WSL 原生盘（同决策 16 的 DB_PATH 思路）。
 19. **图片并发修改 + 版本历史（2026-09-01）**：①单张图对话修改走 `tasks.submit_image_edit`——独立于三大管线的轻量后台通道，多张图并发、同一张图拒绝重复提交，**与管线互斥**（`_submit` 与 `submit_image_edit` 互相检查，防止旧下标/旧图互相覆盖）；UI 不锁整页、只锁被改的图卡片，完成后**按 job 从盘合并回内存**（不整页重载，保住页面上其它未落盘改动）。②每张图的版本历史存 `images/.hist/<文件名>/v{seq}.png`，job 运行时字段 `hist/hist_idx/hist_seq` 记链与位置，所有出图路径（管线/前台/修改）统一走 `runstate.apply_image_version()`：首次调用收编现有主图与老 `.prev`、回退中间版再修改会截断后续版本、超 `HIST_LIMIT=10` 删最老；上一步/下一步/任意回跳走 `runstate.goto_image_version()`（前台经 `runstate.update` 锁内改盘再合并回内存，防止与并发修改互踩）。母版换版本/被修改，派生图照旧失效待重做（决策 9）。
-20. **PostgreSQL 数据层（2026-09-03 定稿，第一阶段=基座已落地，业务未接）**：最终数据层为 PostgreSQL 17 + SQLAlchemy 2.x + Alembic + psycopg（Docker 命名卷，本地 `docker compose up -d`）。设计要点（均经用户确认）：①**零迁移**——旧业务数据全部放弃，唯一保留物是 6 套提示词；②**提示词全入库**——`prompt_templates`（当前生效版）+ `prompt_defaults`（出厂基线）双表，「恢复默认」=整行拷回；出厂文本内嵌在 0002 seed migration 里（新环境 `alembic upgrade head` 即完整可用），本机 prompts.json 用 `scripts/import_prompts_json.py` 一次性导入，**库切换完成后运行时不得再读 prompts.json / DEFAULT_PROMPTS**；③12 张表：products（产品一等实体，替代 product_info 全文全等匹配）/ runs / scenes / jobs / image_versions / copies / ref_assets / run_ref_images / scene_lib / chat_messages / 提示词双表；图片二进制仍在文件系统，库存相对路径；④**DATABASE_URL 只从环境变量读**（缺失明确报错，代码不内置带密码 fallback），compose 凭据走 `.env.local`（gitignore，仓库只留 `.env.example`）；⑤第一版**不建 pg_trgm/GIN 索引**（只留 PK/FK/UNIQUE/CHECK/必要普通索引），真实搜索量出现后再经 Alembic 增加；⑥第二阶段业务切换后：state.json/manifest 落盘/SQLite/prompts.json 废弃，manifest.json 仅作为导出交付包内由 DB 现场生成的文件（协议不变），Streamlit 版随切换退役。
+20. **PostgreSQL 数据层（2026-09-03 定稿，第一阶段=基座已落地，业务未接）**：最终数据层为 PostgreSQL 17 + SQLAlchemy 2.x + Alembic + psycopg（Docker 命名卷，本地 `docker compose up -d`）。设计要点（均经用户确认）：①**零迁移**——旧业务数据全部放弃，唯一保留物是 6 套提示词；②**提示词全入库**——`prompt_templates`（当前生效版）+ `prompt_defaults`（出厂基线）双表，「恢复默认」=整行拷回；出厂文本内嵌在 0002 seed migration 里（新环境 `alembic upgrade head` 即完整可用），本机 prompts.json 用 `scripts/import_prompts_json.py` 一次性导入，**库切换完成后运行时不得再读 prompts.json / DEFAULT_PROMPTS**；③12 张表：products（产品一等实体，替代 product_info 全文全等匹配）/ runs / scenes / jobs / image_versions / copies / ref_assets / run_ref_images / scene_lib / chat_messages / 提示词双表；图片二进制仍在文件系统，库存相对路径；④**DATABASE_URL 只从环境变量读**（缺失明确报错，代码不内置带密码 fallback），compose 凭据走 `.env.local`（gitignore，仓库只留 `.env.example`）；⑤第一版**不建 pg_trgm/GIN 索引**（只留 PK/FK/UNIQUE/CHECK/必要普通索引），真实搜索量出现后再经 Alembic 增加；⑥第二阶段业务切换后：state.json/manifest 落盘/SQLite/prompts.json 废弃，manifest.json 仅作为导出交付包内由 DB 现场生成的文件（协议不变），Streamlit 版随切换退役。**第二阶段已于 2026-09-04 完成**——决策 5/12/13/17 中 Streamlit/state.json 相关条目仅作历史存档；备份 = `pg_dump`（PG 数据）+ outputs/ 目录（图片）。
 
 ## 协作规范（Claude 必须遵守）
 
@@ -180,3 +174,4 @@
 - 2026-09-03（feature/db-postgres 分支）：PostgreSQL 数据层第一阶段——基座落地（决策 20）：docker-compose 起 PostgreSQL 17（凭据走 .env.local，仓库只留 .env.example）；新增 server/db/（Base/session/12 张表 Model）与 Alembic（0001 建表 + 0002 内嵌出厂提示词 seed）；scripts/import_prompts_json.py 一次性导入本机改过的模板。验收全过：12 表/约束/级联/COALESCE 唯一索引结构核对、seed 6+6、prompts.json 逐 key 比对一致、downgrade/upgrade 干净重放、容器重启数据持久。业务读写未动（协议不变），第二阶段再切。
 - 2026-09-04（feature/db-postgres 分支）：第二阶段 2A 提示词切库——core/prompts.py 的 load_prompts/save_prompts 改为读写 prompt_templates 表（对外结构不变，调用方零改动），新增 reset_prompt() 从 prompt_defaults 整行拷回；prompts_admin 路由跟随切换；运行时不再读写 prompts.json（DEFAULT_PROMPTS 常量仅作 seed 历史保留，2D 删除）。
 - 2026-09-04（feature/db-postgres 分支）：第二阶段 2B+2C 任务域全量切库（决策 20）——新增 server/services/state_store.py（PG 版任务仓库：bundle 组装/行级写/图片版本链/参考图/对话，每 run 锁保文件↔库一致）、scene_lib_store.py（场景库 PG 版，excluded_scenes 改按 product_id 精确取）、routers/products.py（产品一等实体 API）；runs/workflow_ops/refs/library 路由与 workflow/mining/scene_lib 服务、core/tasks 全部改走 PG；core/store 移除 manifest 落盘与 SQLite 双写（manifest 仅导出时现场生成进 zip，协议不变）；core/assets 图库元数据入 ref_assets 表；run 目录改 outputs/run_{id}；chats 入表且 key 去批次号（chat_prompt_{i} 等），jobs_gen 概念删除。前端联动：新建任务改「选/建产品」弹窗（NewTaskModal）、场景库产品筛选改 product_id、历史页移除重建索引、Step 页 chats key 同步，dist 已重构建。冒烟：TestClient 全链路 14 组断言（mock LLM/生图）清库重放两次全过。Streamlit 版自本次起失效（数据层已不写 state.json），2D 移除。
+- 2026-09-04（feature/db-postgres 分支）：第二阶段 2D 退役清理——删除 Streamlit 全套（app.py、pages_/、.streamlit/、requirements 中 streamlit 依赖）与已被 PG 取代的模块（core/runstate.py、core/db.py、scripts/rebuild_db.py、scripts/import_prompts_json.py、prompts.json、core/prompts.py 的 DEFAULT_PROMPTS 常量——出厂文本以 0002 migration 为准）；README 与 CLAUDE.md（技术架构/模块说明/数据与接口协议）全面改写为 PostgreSQL 架构。删除后全链路冒烟重跑通过。注意：用户改过的 scene_mining/image_refine 模板现仅存于库中，备份靠 pg_dump。

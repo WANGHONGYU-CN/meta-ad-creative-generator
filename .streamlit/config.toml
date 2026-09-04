@@ -1,7 +1,0 @@
-[browser]
-gatherUsageStats = false
-
-[server]
-headless = true
-# 项目在 /mnt/c（9p 文件系统），文件监听既慢又无必要（生产使用不热改代码）
-fileWatcherType = "none"
