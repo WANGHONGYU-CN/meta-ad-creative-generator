@@ -5,10 +5,9 @@
 启动（日常）：
     ~/venvs/meta-creative-tool/bin/uvicorn server.main:app --port 8000
 
-⚠ 必须单进程（不要加 --workers）：runstate 的每 run 锁与 core/tasks.py 的
-后台线程池都是进程内的，多 worker 会互相覆盖任务状态（CLAUDE.md 决策 12/13）。
-与 Streamlit 版共用同一套数据（outputs/、data/、config.json、prompts.json），
-但两个进程的锁不互通，迁移期同一时间只开一边。
+⚠ 必须单进程（不要加 --workers）：state_store 的每 run 锁与 core/tasks.py 的
+后台线程池都是进程内的，多 worker 会互相覆盖任务状态（CLAUDE.md 决策 12/13/20）。
+数据层为 PostgreSQL（DATABASE_URL 环境变量必配）+ outputs/ 图片文件。
 
 前端构建产物放 web/dist/ 时自动托管（浏览器直接访问本端口）；
 未构建时仅提供 API（文档见 /docs）。
@@ -21,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from core import assets
 from core.config import OUTPUTS_DIR, PROJECT_ROOT
 
-from server.routers import library, prompts_admin, refs, runs, settings_admin, workflow_ops
+from server.routers import library, products, prompts_admin, refs, runs, settings_admin, workflow_ops
 
 app = FastAPI(
     title="Meta 素材工厂 API",
@@ -37,6 +36,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(products.router)
 app.include_router(runs.router)
 app.include_router(workflow_ops.router)
 app.include_router(refs.router)
@@ -54,7 +54,6 @@ def health():
 def _startup():
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     assets.ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-    assets.ensure_backfill()  # 参考图库首次自动导入历史任务的风格图/Logo
 
 
 # 图片等文件直出：outputs/（任务产物）与 data/ref_assets/（全局参考图库）

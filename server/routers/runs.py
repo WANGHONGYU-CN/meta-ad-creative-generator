@@ -1,15 +1,15 @@
-"""任务（run）级接口：列表 / 新建 / 读取 / 字段修改 / 状态轮询 / 导出。"""
+"""任务（run）级接口：列表 / 新建 / 读取 / 字段修改 / 状态轮询 / 导出。run 标识 = run_{id}。"""
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from core import runstate, store
 from core import tasks as bg
 
 from server import deps
 from server.schemas import RunCreate, RunPatch
 from server.services import mining
+from server.services import state_store as st
 from server.services import workflow as wf
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -17,43 +17,33 @@ router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 @router.get("")
 def list_runs():
-    """全部任务（新→旧），带后台运行状态；product_info 等详情从索引库补充。"""
-    from core import db
-
-    info = {r["dir_name"]: r for r in db.list_runs()}
+    """全部任务（新→旧），带后台运行状态。"""
     out = []
-    for d in runstate.list_task_dirs():
-        row = info.get(d.name, {})
-        out.append(
-            {
-                "name": d.name,
-                "product_info": row.get("product_info", ""),
-                "updated_at": row.get("updated_at", ""),
-                "job_count": row.get("job_count", 0),
-                "busy": bg.is_busy(d.name) or mining.is_running(d.name),
-            }
-        )
+    for row in st.list_runs_overview():
+        row["busy"] = bg.is_busy(row["name"]) or mining.is_running(row["name"])
+        out.append(row)
     return out
 
 
 @router.post("", status_code=201)
 def create_run(body: RunCreate):
-    state = runstate.default_state()
-    state["product_info"] = body.product_info
-    state["brand_name"] = body.brand_name
-    state["ad_language"] = body.ad_language
+    ratio = wf.RATIO_LABELS[0]
     if body.ratio_choice:
         try:
-            state["ratio_choice"] = wf.normalize_ratio_choice(body.ratio_choice)
+            ratio = wf.normalize_ratio_choice(body.ratio_choice)
         except ValueError as e:
             raise HTTPException(400, str(e))
-    else:
-        state["ratio_choice"] = wf.RATIO_LABELS[0]
-    if body.title_count:
-        state["title_count"] = int(body.title_count)
-    run_dir = store.create_run_dir(body.product_info[:20] or "新任务")
-    runstate.persist(run_dir, state)
-    return {"name": run_dir.name}
+    try:
+        name = st.create_run(
+            body.product_id,
+            brand_name=body.brand_name,
+            ad_language=body.ad_language,
+            ratio_choice=ratio,
+            title_count=int(body.title_count or 3),
+        )
+    except KeyError as e:
+        raise HTTPException(404, str(e.args[0]) if e.args else "产品不存在")
+    return {"name": name}
 
 
 @router.get("/{run}")
@@ -69,7 +59,7 @@ def get_run(run: str):
 
 @router.patch("/{run}")
 def patch_run(run: str, body: RunPatch):
-    """字段级修改（锁内读改写，与后台结果互不覆盖）。"""
+    """字段级修改（锁内事务，与后台结果互不覆盖）。product_info 落在产品行。"""
     run_dir = deps.get_run_dir(run)
     fields = body.model_dump(exclude_none=True)
     if not fields:
@@ -79,14 +69,7 @@ def patch_run(run: str, body: RunPatch):
             fields["ratio_choice"] = wf.normalize_ratio_choice(fields["ratio_choice"])
         except ValueError as e:
             raise HTTPException(400, str(e))
-    if "selected_scenes" in fields:
-        n = len(deps.load_state(run_dir).get("scenes", []))
-        fields["selected_scenes"] = [i for i in dict.fromkeys(fields["selected_scenes"]) if 0 <= i < n]
-
-    def mut(state):
-        state.update(fields)
-
-    state = runstate.update(run_dir, mut)
+    state = st.patch_run_fields(run_dir, fields)
     return {"name": run, "state": deps.enrich_state(run, state)}
 
 

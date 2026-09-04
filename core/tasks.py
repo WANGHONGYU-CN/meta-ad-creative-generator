@@ -1,22 +1,23 @@
 """后台任务执行器：生图 / 批量文案 两类耗时管线 + 单张图片修改（并发）。
 
-- 模块级单例线程池，整个 Streamlit 进程共享（页面重跑不会重建）；
-- 线程内不访问 st.session_state（CLAUDE.md 决策 11）：入参在主线程取好传入，
-  进度写本模块状态表，结果经 runstate.update() 锁内逐条落盘 state.json/manifest/数据库；
+- 模块级单例线程池，整个服务进程共享（必须单 worker，决策 13）；
+- 入参在主线程取好传入，进度写本模块状态表，结果经 state_store 锁内逐条落库
+  （PostgreSQL，决策 20 第二阶段）；
 - 每个 run 同一时间只允许一个后台**管线**（submit 拒绝重复提交），UI 侧据此锁定该任务的编辑区；
 - 单张图片修改（submit_image_edit）是独立轻量通道：不锁整页、多张图可并发修改
   （同一张图不允许重复提交），与管线互斥——管线运行中拒绝提交修改，反之亦然；
-  UI persist 守卫用 is_busy()（管线或任一修改在跑都跳过，决策 12 延伸）；
-- 「后台」指不阻塞页面、切任务/刷新页面不中断；关闭 Streamlit 进程则任务终止，
-  已完成的子项均已落盘，重启后重新提交只补缺。
+- 「后台」指不阻塞页面、切任务/刷新页面不中断；关闭服务进程则任务终止，
+  已完成的子项均已落库，重启后重新提交只补缺。
 """
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from core import db, imagen, llm, runstate
+from core import imagen, llm
 from core.logger import get_logger
 from core.prompts import render
+from server.services import scene_lib_store
+from server.services import state_store as st
 
 log = get_logger("tasks")
 
@@ -112,31 +113,10 @@ def _submit(kind: str, run_dir: Path, fn) -> bool:
 
 
 def _apply_image(run_dir: Path, i: int, png: bytes, image_prompt=None) -> None:
-    """写盘并更新第 i 个 job；若为母版，其派生图失效待重做（与前台逻辑一致）。"""
-
-    def mut(state):
-        jobs = state.get("jobs", [])
-        if i >= len(jobs):
-            return
-        job = jobs[i]
-        path = runstate.apply_image_version(Path(run_dir), job, png)  # 写主图 + 追加版本历史
-        job["image_path"] = str(path)
-        job["copies"] = []
-        job["rev"] = job.get("rev", 0) + 1
-        job["has_prev"] = False
-        if image_prompt is not None:
-            job["image_prompt"] = image_prompt
-        if not job.get("derived_from"):
-            for other in jobs:
-                if other is not job and other.get("derived_from") == job["filename"]:
-                    other["image_path"] = ""
-                    other["copies"] = []
-                    other["has_prev"] = False
-
-    state = runstate.update(run_dir, mut)
-    jobs = state.get("jobs", [])
-    if i < len(jobs):
-        db.mark_scene_has_image(state.get("product_info", ""), jobs[i]["main_scene"], jobs[i]["sub_scene"])
+    """落库落盘第 i 个 job 的新图（含版本历史；母版出新图时派生图失效待重做），
+    并给场景库打 has_image 标签（失败只记日志，不影响生图）。"""
+    info = st.apply_image_result(run_dir, i, png, image_prompt=image_prompt)
+    scene_lib_store.mark_scene_has_image(info["product_id"], info["main_scene"], info["sub_scene"])
 
 
 # ---------------------------------------------------------------- 两条管线
@@ -153,7 +133,6 @@ def new_job(row: dict, ratio: str, image_prompt: str, filename: str, derived_fro
         "copies": [],
         "derived_from": derived_from,
         "rev": 0,
-        "has_prev": False,
     }
 
 
@@ -163,9 +142,9 @@ def _ref_bundle(run_dir, ref_rel_paths, style_rel_paths, logo_rel_paths) -> tupl
     返回 (images, note, has_style)。只有产品参考图时不追加说明（保持决策 15 的
     原样直发）；出现风格图或 Logo 时必须用说明告诉模型各张参考图的身份，否则模型
     无法区分。has_style 供生图管线在发送瞬间填充提示词里的 {reference_style_image}。"""
-    product = runstate.load_ref_images(run_dir, ref_rel_paths)
-    style = runstate.load_ref_images(run_dir, style_rel_paths)
-    logo = runstate.load_ref_images(run_dir, logo_rel_paths)
+    product = st.load_ref_images(run_dir, ref_rel_paths)
+    style = st.load_ref_images(run_dir, style_rel_paths)
+    logo = st.load_ref_images(run_dir, logo_rel_paths)
     images = product + style + logo
     if not (style or logo):
         return images, "", False
@@ -209,7 +188,7 @@ def submit_image_generation(
     key = Path(run_dir).name
 
     def work():
-        state = runstate.load(run_dir) or runstate.default_state()
+        state = st.load(run_dir) or {}
         jobs = state.get("jobs", [])
         ref_images, ref_note, has_style = _ref_bundle(
             run_dir, ref_rel_paths, style_rel_paths or [], logo_rel_paths or []
@@ -246,7 +225,7 @@ def submit_image_generation(
 
         for i in derived_indices:
             # 重新读盘：母版结果由 _apply_image 写入了 state
-            state = runstate.load(run_dir) or runstate.default_state()
+            state = st.load(run_dir) or {}
             jobs = state.get("jobs", [])
             job = jobs[i]
             done += 1
@@ -276,7 +255,7 @@ def submit_copywriting(config, prompts, run_dir, indices, title_count, product_i
     key = Path(run_dir).name
 
     def work():
-        state = runstate.load(run_dir) or runstate.default_state()
+        state = st.load(run_dir) or {}
         jobs = state.get("jobs", [])
         total = len(indices)
         _set(key, total=total, text="生成文案…")
@@ -307,14 +286,7 @@ def submit_copywriting(config, prompts, run_dir, indices, title_count, product_i
                 done += 1
                 _set(key, done=done, text=f"文案 {done}/{total}：{job['sub_scene']}（{job['ratio']}）")
                 try:
-                    copies = fut.result()
-
-                    def mut(state, i=i, copies=copies):
-                        j = state["jobs"][i]
-                        j["copies"] = copies
-                        j["rev"] = j.get("rev", 0) + 1
-
-                    runstate.update(run_dir, mut)
+                    st.set_job_copies(run_dir, i, fut.result())
                 except Exception as e:  # noqa: BLE001
                     _add_error(key, f"「{job['sub_scene']}（{job['ratio']}）」文案生成失败：{e}")
 
@@ -345,7 +317,7 @@ def submit_image_edit(config, prompts, run_dir, i: int, feedback: str) -> bool:
     def work():
         log.info("图片修改开始 run=%s job=%d", key, i)
         try:
-            state = runstate.load(run_dir) or runstate.default_state()
+            state = st.load(run_dir) or {}
             jobs = state.get("jobs", [])
             if i >= len(jobs):
                 raise RuntimeError("任务列表已变化，找不到这张图")

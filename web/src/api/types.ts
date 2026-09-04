@@ -1,5 +1,14 @@
-// 与 server/ 返回结构对应的类型。state.json 是权威数据，字段随功能演进，
+// 与 server/ 返回结构对应的类型。数据层为 PostgreSQL（run 标识 = run_{id}），
 // 这里只声明前端用到的部分，未知字段透传不报错。
+
+export interface Product {
+  id: number
+  name: string
+  info: string
+  brand_name: string
+  ad_language: string
+  run_count?: number
+}
 
 export interface ChatMsg {
   role: 'user' | 'assistant'
@@ -48,6 +57,8 @@ export interface Job {
 }
 
 export interface RunState {
+  product_id: number
+  product_name: string
   product_info: string
   brand_name: string
   ad_language: string
@@ -56,7 +67,6 @@ export interface RunState {
   scenes: SceneRow[]
   selected_scenes: number[]
   jobs: Job[]
-  jobs_gen: number
   ref_images: string[]
   style_images: string[]
   logo_images: string[]
@@ -142,14 +152,15 @@ export interface SettingsPayload {
 
 export interface SceneLibRow {
   id: number
+  product_id: number
   product_info: string
   main_scene: string
   sub_scene: string
   description: string
   detail: SceneDetail
   total_score: number | null
-  has_image: number
-  in_ads: number
+  has_image: boolean
+  in_ads: boolean
   source_run: string
   created_at: string
 }

@@ -1,7 +1,7 @@
-"""提示词管理接口：6 套提示词在线编辑 / 恢复默认（对应 Streamlit 提示词管理页）。"""
+"""提示词管理接口：6 套提示词在线编辑 / 恢复默认（存储在 prompt_templates / prompt_defaults 表）。"""
 from fastapi import APIRouter, HTTPException
 
-from core.prompts import DEFAULT_PROMPTS, load_prompts, save_prompts
+from core.prompts import load_prompts, reset_prompt as reset_prompt_row, save_prompts
 
 from server.schemas import PromptPut
 
@@ -37,9 +37,8 @@ def save_prompt(key: str, body: PromptPut):
 
 @router.post("/{key}/reset")
 def reset_prompt(key: str):
-    prompts = _key_or_404(key)
-    if key not in DEFAULT_PROMPTS:
-        raise HTTPException(400, f"该提示词没有内置默认值：{key}")
-    prompts[key]["template"] = DEFAULT_PROMPTS[key]["template"]
-    save_prompts(prompts)
-    return {"key": key, "prompt": prompts[key]}
+    _key_or_404(key)
+    restored = reset_prompt_row(key)
+    if restored is None:
+        raise HTTPException(400, f"该提示词没有出厂默认值：{key}")
+    return {"key": key, "prompt": restored}

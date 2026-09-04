@@ -80,7 +80,6 @@ function CopiesEditor({ run, index, job }: { run: string; index: number; job: Jo
 
 export default function StepCopies({ run, bundle }: { run: string; bundle: RunBundle }) {
   const s = bundle.state
-  const g = s.jobs_gen
   const qc = useQueryClient()
   const { message } = App.useApp()
   const [titleCount, setTitleCount] = useState(s.title_count)
@@ -151,7 +150,7 @@ export default function StepCopies({ run, bundle }: { run: string; bundle: RunBu
       </Card>
 
       {withImage.map(([job, i]) => (
-        <Card key={`${g}-${i}`} size="small" style={{ marginBottom: 12 }}>
+        <Card key={i} size="small" style={{ marginBottom: 12 }}>
           <Flex gap={16} align="start">
             <div style={{ width: 170, flexShrink: 0 }}>
               <Image src={job.image_url} width={170} style={{ borderRadius: 8 }} />
@@ -189,7 +188,7 @@ export default function StepCopies({ run, bundle }: { run: string; bundle: RunBu
           onClose={() => setChatIdx(null)}
           title={`AI 修改文案 · ${s.jobs[chatIdx].sub_scene}（${s.jobs[chatIdx].ratio}）`}
           subtitle="AI 会看着这张图和你的意见整批修改该图的文案。"
-          history={s.chats[`chat_copies_${g}_${chatIdx}`] ?? []}
+          history={s.chats[`chat_copies_${chatIdx}`] ?? []}
           placeholder="例：语气更年轻；第 2 套换成促销角度；标题都加 emoji…"
           onSend={async (fb) => {
             await api.refineCopies(run, chatIdx, fb)

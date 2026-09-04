@@ -4,11 +4,25 @@ from pydantic import BaseModel, Field
 
 
 class RunCreate(BaseModel):
-    product_info: str = ""
-    brand_name: str = ""
-    ad_language: str = ""
+    product_id: int
+    brand_name: str | None = None  # None = 继承产品默认值
+    ad_language: str | None = None
     ratio_choice: str | None = None  # label 或别名 1:1 / 4:5 / dual
     title_count: int | None = Field(default=None, ge=1, le=10)
+
+
+class ProductCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    info: str = ""
+    brand_name: str = ""
+    ad_language: str = ""
+
+
+class ProductPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    info: str | None = None
+    brand_name: str | None = None
+    ad_language: str | None = None
 
 
 class RunPatch(BaseModel):

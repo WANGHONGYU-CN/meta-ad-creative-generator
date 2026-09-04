@@ -1,7 +1,7 @@
 // 轻量请求封装：同源调用 FastAPI（开发时由 Vite 代理到 8000）。
 // 错误统一抛 ApiError，message 取后端的 detail 字段。
 import type {
-  AssetItem, ExportResult, HistoryJob, HistoryRun, PromptItem, PromptsPayload,
+  AssetItem, ExportResult, HistoryJob, HistoryRun, Product, PromptItem, PromptsPayload,
   RunBundle, RunListItem, RunState, RunStatus, SceneLibRow, SettingsPayload,
 } from './types'
 
@@ -38,9 +38,17 @@ const jbody = (body: unknown): RequestInit => ({
 const e = encodeURIComponent
 
 export const api = {
+  // ---------------- 产品
+  listProducts: () => req<Product[]>('/api/products'),
+  createProduct: (body: { name: string; info?: string; brand_name?: string; ad_language?: string }) =>
+    req<Product>('/api/products', jbody(body)),
+  patchProduct: (id: number, body: Partial<Omit<Product, 'id' | 'run_count'>>) =>
+    req<Product>(`/api/products/${id}`, { ...jbody(body), method: 'PATCH' }),
+
   // ---------------- 任务
   listRuns: () => req<RunListItem[]>('/api/runs'),
-  createRun: (body: Partial<RunState>) => req<{ name: string }>('/api/runs', jbody(body)),
+  createRun: (body: { product_id: number; ratio_choice?: string; title_count?: number }) =>
+    req<{ name: string }>('/api/runs', jbody(body)),
   getRun: (run: string) => req<RunBundle>(`/api/runs/${e(run)}`),
   patchRun: (run: string, body: Record<string, unknown>) =>
     req<{ name: string; state: RunState }>(`/api/runs/${e(run)}`, { ...jbody(body), method: 'PATCH' }),
@@ -102,10 +110,10 @@ export const api = {
   // ---------------- 历史 / 场景库
   historyRuns: (keyword: string) => req<HistoryRun[]>(`/api/history/runs?keyword=${e(keyword)}`),
   historyJobs: (runId: number) => req<{ run: HistoryRun; jobs: HistoryJob[] }>(`/api/history/runs/${runId}/jobs`),
-  rebuildIndex: () => req<{ imported: number; errors: { dir: string; message: string }[] }>('/api/history/rebuild', { method: 'POST' }),
   sceneLib: (params: URLSearchParams) => req<SceneLibRow[]>(`/api/scene-lib?${params}`),
-  sceneLibProducts: () => req<string[]>('/api/scene-lib/products'),
-  sceneLibMainScenes: (product: string) => req<string[]>(`/api/scene-lib/main-scenes?product=${e(product)}`),
+  sceneLibProducts: () => req<Pick<Product, 'id' | 'name' | 'info'>[]>('/api/scene-lib/products'),
+  sceneLibMainScenes: (productId: number | null) =>
+    req<string[]>(`/api/scene-lib/main-scenes${productId != null ? `?product_id=${productId}` : ''}`),
   setInAds: (id: number, inAds: boolean) =>
     req<{ ok: boolean }>(`/api/scene-lib/${id}`, { ...jbody({ in_ads: inAds }), method: 'PATCH' }),
   deleteScenes: (ids: number[]) => req<{ deleted: number }>('/api/scene-lib/delete', jbody({ ids })),

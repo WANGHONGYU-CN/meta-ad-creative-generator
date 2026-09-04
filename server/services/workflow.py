@@ -1,30 +1,37 @@
-"""工作流业务逻辑（无 UI 依赖）：从 pages_/workflow.py 抽取，供 FastAPI 层调用。
+"""工作流业务逻辑（无 UI 依赖），数据层为 PostgreSQL（决策 20 第二阶段）。
 
-与 Streamlit 页的关键差异：
-- 所有状态修改都走 runstate.update() 锁内「读盘-改-写盘」，字段级合并，
-  不存在「整份内存 state 覆盖盘上后台结果」的问题，因此不需要 persist 守卫/脏标记；
-- 对话历史直接存 state.json 的 chats key（沿用 chat_scenes / chat_prompt_{g}_{i} /
-  chat_image_{g}_{i} / chat_copies_{g}_{i} 命名，与 Streamlit 版数据互通）；
-- 数据协议（state.json / manifest.json / prompts.json / xlsx）与 CLAUDE.md 一致，未变。
+- 所有状态读写走 server/services/state_store（每 run 锁 + DB 事务），
+  交换格式仍是 state dict；对话历史在 chat_messages 表，
+  bundle 里的 key 为 chat_scenes / chat_prompt_{i} / chat_image_{i} / chat_copies_{i}（i=job seq）；
+- manifest.json 不再持续落盘，导出交付包时由库内数据现场生成（协议不变）。
 """
 import json
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
-from core import db, llm, runstate, store
+from core import llm, store
 from core import tasks as bg
 from core.prompts import render
 
-# 与 pages_/workflow.py 完全一致的比例选项（state.ratio_choice 存的就是这些 label，
-# 不得改动，否则老任务载入后比例解析不一致）
+from server.services import scene_lib_store
+from server.services import state_store as st
+
+# 与旧版完全一致的比例选项（run.ratio_choice 存的就是这些 label）
 RATIO_OPTIONS = {
     "1:1（方图）": ["1:1"],
     "4:5（竖图）": ["4:5"],
     "双尺寸（先出 4:5 母版，再改尺寸出内容一致的 1:1）": ["4:5", "1:1"],
 }
 RATIO_LABELS = list(RATIO_OPTIONS)
-# API 侧允许用短别名（前端好用），落盘时转成 label
+# API 侧允许用短别名（前端好用），落库时转成 label
 RATIO_ALIASES = {"1:1": RATIO_LABELS[0], "4:5": RATIO_LABELS[1], "dual": RATIO_LABELS[2]}
+
+# 导出交付包内 manifest.json 的 job 字段白名单（对外交付协议，不得增删）
+MANIFEST_JOB_KEYS = [
+    "main_scene", "sub_scene", "sub_scene_desc", "ratio",
+    "image_prompt", "filename", "image_path", "copies", "derived_from",
+]
 
 
 def normalize_ratio_choice(value: str) -> str:
@@ -35,24 +42,13 @@ def normalize_ratio_choice(value: str) -> str:
     raise ValueError(f"不支持的尺寸选项：{value}")
 
 
-def infer_ratio_choice(jobs: list) -> str:
-    if any(j.get("derived_from") for j in jobs):
-        return RATIO_LABELS[2]
-    if {j.get("ratio") for j in jobs} == {"4:5"}:
-        return RATIO_LABELS[1]
-    return RATIO_LABELS[0]
-
-
 def ratios_of(state: dict) -> list:
     rc = state.get("ratio_choice") or ""
-    if rc not in RATIO_OPTIONS:
-        rc = infer_ratio_choice(state.get("jobs", [])) if state.get("jobs") else RATIO_LABELS[0]
-    return RATIO_OPTIONS[rc]
+    return RATIO_OPTIONS.get(rc, RATIO_OPTIONS[RATIO_LABELS[0]])
 
 
 def scene_rows_from_result(result: dict) -> list:
-    """兼容两代提示词的返回：老版 sub 只有 name/description；
-    新版 sub 有多字段（audience/trigger/…/score_breakdown），除 name 外全部收进 detail。"""
+    """挖掘返回 → 场景行。sub 的 name/description 之外字段全部收进 detail。"""
     rows = []
     for scene in result.get("scenes", []):
         for sub in scene.get("sub_scenes", []):
@@ -76,8 +72,7 @@ def scene_rows_from_result(result: dict) -> list:
 
 def render_job_prompt(prompts: dict, state: dict, row: dict, ratio: str) -> str:
     """场景变量 + 品牌名/广告语言/比例 本地替换进「生图总提示词」模板。
-    {reference_style_image} 占位符保留，由生图管线在发送瞬间填充（core/tasks.py）。
-    老格式场景（无 detail）product_use 回退 description，其余字段为空。"""
+    {reference_style_image} 占位符保留，由生图管线在发送瞬间填充（core/tasks.py）。"""
     d = row.get("detail") or {}
     return render(
         prompts["image_gen"]["template"],
@@ -117,20 +112,11 @@ def has_image(job: dict) -> bool:
     return bool(job.get("image_path"))
 
 
-# ---------------------------------------------------------------- 对话历史（存 state.chats）
-def append_chat(run_dir: Path, chat_key: str, *messages: dict) -> None:
-    def mut(state):
-        chats = state.setdefault("chats", {})
-        chats.setdefault(chat_key, []).extend(messages)
-
-    runstate.update(run_dir, mut)
-
-
-def refine_via_llm(config, prompts, state, chat_key, task_context, current_output, feedback, images=None):
+# ---------------------------------------------------------------- 对话式修改公共件
+def refine_via_llm(config, prompts, history: list, task_context, current_output, feedback, images=None):
     """走「结果修改」提示词让 Claude 修订当前结果，返回修改后的内容。
-    历史意见取 state.chats[chat_key] 中的用户消息（与 Streamlit 版一致，不含本次）。"""
-    history = (state.get("chats") or {}).get(chat_key) or []
-    history_lines = [f"- {m['content']}" for m in history if m.get("role") == "user"]
+    history 为该对话已有消息列表（历史意见取其中的用户消息，不含本次）。"""
+    history_lines = [f"- {m['content']}" for m in history or [] if m.get("role") == "user"]
     prompt = render(
         prompts["refine_text"]["template"],
         {
@@ -146,12 +132,16 @@ def refine_via_llm(config, prompts, state, chat_key, task_context, current_outpu
     return result["result"]
 
 
+_DONE = {"role": "assistant", "content": "✅ 已按意见修改"}
+
+
 # ---------------------------------------------------------------- 场景：对话修改
 def refine_scenes(config, prompts, run_dir: Path, feedback: str) -> dict:
-    """让 Claude 修订场景列表；成功后落盘并同步场景库，返回最新 state。"""
-    state = runstate.load(run_dir) or runstate.default_state()
+    """让 Claude 修订场景列表；成功后落库并同步场景库，返回最新 state。"""
+    state = st.load(run_dir) or {}
     current = {"scenes": state.get("scenes", [])}
-    new = refine_via_llm(config, prompts, state, "chat_scenes", "场景挖掘结果（主场景 + 细分场景列表）", current, feedback)
+    history = (state.get("chats") or {}).get("chat_scenes") or []
+    new = refine_via_llm(config, prompts, history, "场景挖掘结果（主场景 + 细分场景列表）", current, feedback)
     rows = new.get("scenes", []) if isinstance(new, dict) else new
     if not isinstance(rows, list) or not rows:
         raise ValueError("模型返回的场景列表为空或格式不对")
@@ -170,31 +160,29 @@ def refine_scenes(config, prompts, run_dir: Path, feedback: str) -> dict:
     if not cleaned:
         raise ValueError("模型返回的场景列表为空或格式不对")
 
-    def mut(s):
-        s["scenes"] = cleaned
-        s["selected_scenes"] = []
-        chats = s.setdefault("chats", {})
-        chats.setdefault("chat_scenes", []).extend(
-            [{"role": "user", "content": feedback}, {"role": "assistant", "content": "✅ 已按意见修改"}]
-        )
-
-    new_state = runstate.update(run_dir, mut)
-    db.upsert_scene_rows_safe(new_state.get("product_info", ""), Path(run_dir).name, cleaned)
+    new_state = st.replace_scenes(run_dir, cleaned)
+    st.append_chat(run_dir, "scenes", None, {"role": "user", "content": feedback}, _DONE)
+    scene_lib_store.upsert_scenes_safe(
+        new_state["product_id"], st.parse_run_name(Path(run_dir).name), cleaned)
+    new_state.setdefault("chats", {}).setdefault("chat_scenes", []).extend(
+        [{"role": "user", "content": feedback}, dict(_DONE)])
     return new_state
 
 
 # ---------------------------------------------------------------- 提示词 / 文案：对话修改
-def refine_job_prompt(config, prompts, run_dir: Path, i: int, feedback: str) -> dict:
-    state = runstate.load(run_dir) or runstate.default_state()
+def _job_or_raise(state: dict, i: int) -> dict:
     jobs = state.get("jobs", [])
     if not (0 <= i < len(jobs)):
         raise IndexError("job 下标越界")
-    job = jobs[i]
-    g = int(state.get("jobs_gen", 0))
-    chat_key = f"chat_prompt_{g}_{i}"
+    return jobs[i]
+
+
+def refine_job_prompt(config, prompts, run_dir: Path, i: int, feedback: str) -> dict:
+    state = st.load(run_dir) or {}
+    job = _job_or_raise(state, i)
+    history = (state.get("chats") or {}).get(f"chat_prompt_{i}") or []
     new = refine_via_llm(
-        config, prompts, state,
-        chat_key,
+        config, prompts, history,
         f"生图总提示词（场景：{job['main_scene']} / {job['sub_scene']}，比例 {job['ratio']}，渲染后直发生图模型）",
         {"image_prompt": job["image_prompt"]},
         feedback,
@@ -203,35 +191,23 @@ def refine_job_prompt(config, prompts, run_dir: Path, i: int, feedback: str) -> 
         new = new.get("image_prompt", "")
     if not str(new).strip():
         raise ValueError("模型返回的提示词为空")
-
-    def mut(s):
-        js = s.get("jobs", [])
-        if i < len(js):
-            js[i]["image_prompt"] = str(new).strip()
-            js[i]["rev"] = js[i].get("rev", 0) + 1
-        chats = s.setdefault("chats", {})
-        chats.setdefault(chat_key, []).extend(
-            [{"role": "user", "content": feedback}, {"role": "assistant", "content": "✅ 已按意见修改"}]
-        )
-
-    return runstate.update(run_dir, mut)
+    new_state = st.update_job(run_dir, i, image_prompt=str(new).strip())
+    st.append_chat(run_dir, "prompt", i, {"role": "user", "content": feedback}, _DONE)
+    new_state.setdefault("chats", {}).setdefault(f"chat_prompt_{i}", []).extend(
+        [{"role": "user", "content": feedback}, dict(_DONE)])
+    return new_state
 
 
 def refine_job_copies(config, prompts, run_dir: Path, i: int, feedback: str) -> dict:
-    state = runstate.load(run_dir) or runstate.default_state()
-    jobs = state.get("jobs", [])
-    if not (0 <= i < len(jobs)):
-        raise IndexError("job 下标越界")
-    job = jobs[i]
-    g = int(state.get("jobs_gen", 0))
-    chat_key = f"chat_copies_{g}_{i}"
+    state = st.load(run_dir) or {}
+    job = _job_or_raise(state, i)
+    history = (state.get("chats") or {}).get(f"chat_copies_{i}") or []
     images = None
     p = Path(job.get("image_path", ""))
     if job.get("image_path") and p.exists():
         images = [llm.vision_image(p.read_bytes())]
     new = refine_via_llm(
-        config, prompts, state,
-        chat_key,
+        config, prompts, history,
         f"广告标题文案（场景：{job['main_scene']} / {job['sub_scene']}，配图见附图）",
         {"copies": job["copies"]},
         feedback,
@@ -241,18 +217,11 @@ def refine_job_copies(config, prompts, run_dir: Path, i: int, feedback: str) -> 
         new = new.get("copies", [])
     if not isinstance(new, list) or not new:
         raise ValueError("模型返回的文案列表为空或格式不对")
-
-    def mut(s):
-        js = s.get("jobs", [])
-        if i < len(js):
-            js[i]["copies"] = new
-            js[i]["rev"] = js[i].get("rev", 0) + 1
-        chats = s.setdefault("chats", {})
-        chats.setdefault(chat_key, []).extend(
-            [{"role": "user", "content": feedback}, {"role": "assistant", "content": "✅ 已按意见修改"}]
-        )
-
-    return runstate.update(run_dir, mut)
+    new_state = st.set_job_copies(run_dir, i, new)
+    st.append_chat(run_dir, "copies", i, {"role": "user", "content": feedback}, _DONE)
+    new_state.setdefault("chats", {}).setdefault(f"chat_copies_{i}", []).extend(
+        [{"role": "user", "content": feedback}, dict(_DONE)])
+    return new_state
 
 
 # ---------------------------------------------------------------- 生图提交
@@ -266,23 +235,16 @@ def _submit_to_pipeline(config, prompts, run_dir: Path, state: dict, masters: li
 
 
 def start_generation(config, prompts, run_dir: Path) -> dict:
-    """勾选场景一键生图：重建 jobs（jobs_gen+1，清理上一批 job 的对话历史）并提交后台管线。
+    """勾选场景一键生图：重建 jobs（旧批次连带对话级联清理）并提交后台管线。
     返回最新 state。冲突（管线/修改在跑）抛 RuntimeError。"""
     key = Path(run_dir).name
     if bg.is_busy(key):
         raise RuntimeError("本任务已有后台任务或图片修改在运行，请稍后再试")
-
-    def mut(s):
-        rows = [s["scenes"][i] for i in s.get("selected_scenes", []) if i < len(s.get("scenes", []))]
-        if not rows:
-            raise ValueError("请先勾选至少一个场景")
-        s["jobs_gen"] = int(s.get("jobs_gen", 0)) + 1
-        chats = s.setdefault("chats", {})
-        for k in [k for k in list(chats) if k.startswith(("chat_prompt_", "chat_image_", "chat_copies_"))]:
-            del chats[k]
-        s["jobs"] = build_jobs(prompts, s, rows)
-
-    state = runstate.update(run_dir, mut)
+    state = st.load(run_dir) or {}
+    rows = [state["scenes"][i] for i in state.get("selected_scenes", []) if i < len(state.get("scenes", []))]
+    if not rows:
+        raise ValueError("请先勾选至少一个场景")
+    state = st.rebuild_jobs(run_dir, build_jobs(prompts, state, rows))
     masters = [i for i, j in enumerate(state["jobs"]) if not j.get("derived_from")]
     derived = [i for i, j in enumerate(state["jobs"]) if j.get("derived_from")]
     _submit_to_pipeline(config, prompts, run_dir, state, masters, derived)
@@ -290,7 +252,7 @@ def start_generation(config, prompts, run_dir: Path) -> dict:
 
 
 def pending_indices(state: dict) -> tuple:
-    """待生成/失败可重试的下标：(母版列表, 派生列表)。与 Streamlit 页逻辑一致。"""
+    """待生成/失败可重试的下标：(母版列表, 派生列表)。"""
     jobs = state.get("jobs", [])
 
     def master_index(job):
@@ -314,7 +276,7 @@ def pending_indices(state: dict) -> tuple:
 
 def retry_generation(config, prompts, run_dir: Path) -> int:
     """补齐/重试待生成的图，返回提交张数（0 = 无待生成）。"""
-    state = runstate.load(run_dir) or runstate.default_state()
+    state = st.load(run_dir) or {}
     masters, derived = pending_indices(state)
     if not masters and not derived:
         return 0
@@ -324,11 +286,9 @@ def retry_generation(config, prompts, run_dir: Path) -> int:
 
 def regenerate_job(config, prompts, run_dir: Path, i: int) -> None:
     """单张重生成：母版走生图，派生图走母版改尺寸。"""
-    state = runstate.load(run_dir) or runstate.default_state()
-    jobs = state.get("jobs", [])
-    if not (0 <= i < len(jobs)):
-        raise IndexError("job 下标越界")
-    if jobs[i].get("derived_from"):
+    state = st.load(run_dir) or {}
+    job = _job_or_raise(state, i)
+    if job.get("derived_from"):
         _submit_to_pipeline(config, prompts, run_dir, state, [], [i])
     else:
         _submit_to_pipeline(config, prompts, run_dir, state, [i], [])
@@ -336,18 +296,15 @@ def regenerate_job(config, prompts, run_dir: Path, i: int) -> None:
 
 # ---------------------------------------------------------------- 图片对话修改（后台并发）
 def submit_image_edit(config, prompts, run_dir: Path, i: int, feedback: str) -> None:
-    """提交单张图后台修改，并把对话写进 state.chats（用户意见 + 排队回执）。"""
-    state = runstate.load(run_dir) or runstate.default_state()
-    jobs = state.get("jobs", [])
-    if not (0 <= i < len(jobs)):
-        raise IndexError("job 下标越界")
-    if not has_image(jobs[i]):
+    """提交单张图后台修改，并把对话写入库（用户意见 + 排队回执）。"""
+    state = st.load(run_dir) or {}
+    job = _job_or_raise(state, i)
+    if not has_image(job):
         raise RuntimeError("找不到当前图片文件")
     if not bg.submit_image_edit(config, prompts, run_dir, i, feedback):
         raise RuntimeError("这张图已有修改在进行中，或本任务后台管线正在运行")
-    g = int(state.get("jobs_gen", 0))
-    append_chat(
-        run_dir, f"chat_image_{g}_{i}",
+    st.append_chat(
+        run_dir, "image", i,
         {"role": "user", "content": feedback},
         {"role": "assistant", "content": "🕐 已提交后台修改，完成后图片自动更新；期间可继续修改其它图或做别的操作"},
     )
@@ -357,56 +314,32 @@ def ack_image_edit(run_dir: Path, i: int) -> dict | None:
     """收割一张图的修改结果：清除状态记录并把结果写进对话历史。
     返回被清除的状态（{state, error}），无待收割记录返回 None。"""
     key = Path(run_dir).name
-    st = bg.edit_status(key).get(i)
-    if not st or st["state"] not in ("finished", "failed"):
+    status = bg.edit_status(key).get(i)
+    if not status or status["state"] not in ("finished", "failed"):
         return None
     bg.clear_edit(key, i)
-    state = runstate.load(run_dir) or runstate.default_state()
-    g = int(state.get("jobs_gen", 0))
-    msg = "✅ 修改完成，图片已更新" if st["state"] == "finished" else f"❌ 修改失败：{st['error']}"
-    append_chat(run_dir, f"chat_image_{g}_{i}", {"role": "assistant", "content": msg})
-    return st
+    msg = "✅ 修改完成，图片已更新" if status["state"] == "finished" else f"❌ 修改失败：{status['error']}"
+    st.append_chat(run_dir, "image", i, {"role": "assistant", "content": msg})
+    return status
 
 
 # ---------------------------------------------------------------- 图片版本历史
 def goto_version(run_dir: Path, i: int, new_idx: int) -> dict:
-    """把第 i 张图切到版本 new_idx。锁内改盘（与并发的图片修改互不覆盖），返回最新 state。
-    与 Streamlit 版一致：母版换版本后派生图失效待重做、copies 清空。"""
-    hit = {}
-
-    def mut(state):
-        jobs = state.get("jobs", [])
-        if i >= len(jobs):
-            return
-        job = jobs[i]
-        if not runstate.goto_image_version(run_dir, job, new_idx):
-            return
-        job["rev"] = job.get("rev", 0) + 1
-        job["copies"] = []
-        if not job.get("derived_from"):
-            for other in jobs:
-                if other is not job and other.get("derived_from") == job["filename"]:
-                    other["image_path"] = ""
-                    other["copies"] = []
-                    other["has_prev"] = False
-        hit["filename"] = job["filename"]
-
-    state = runstate.update(run_dir, mut)
-    if not hit:
-        raise FileNotFoundError("该版本的图片文件不存在或下标越界")
-    return state
+    """把第 i 张图切到版本 new_idx（锁内文件+库一致更新）。
+    母版换版本后派生图失效待重做、copies 清空。版本缺失抛 FileNotFoundError。"""
+    return st.goto_image_version(run_dir, i, new_idx)
 
 
 # ---------------------------------------------------------------- 文案
 def start_copywriting(config, prompts, run_dir: Path, title_count: int | None = None) -> int:
     """对已出图且无文案的 job 批量生成文案（后台），返回提交张数。"""
-    state = runstate.load(run_dir) or runstate.default_state()
+    state = st.load(run_dir) or {}
     need = [i for i, j in enumerate(state.get("jobs", [])) if has_image(j) and not j.get("copies")]
     if not need:
         return 0
     count = int(title_count or state.get("title_count", 3))
     if title_count is not None and int(title_count) != int(state.get("title_count", 3)):
-        runstate.update(run_dir, lambda s: s.__setitem__("title_count", int(title_count)))
+        st.patch_run_fields(run_dir, {"title_count": int(title_count)})
     ok = bg.submit_copywriting(config, prompts, run_dir, need, count, state.get("product_info", ""))
     if not ok:
         raise RuntimeError("本任务已有后台任务在运行，请稍后再试")
@@ -414,9 +347,21 @@ def start_copywriting(config, prompts, run_dir: Path, title_count: int | None = 
 
 
 # ---------------------------------------------------------------- 导出
+def _manifest_from_state(state: dict) -> dict:
+    """交付包内 manifest.json：由库内数据现场生成，字段协议与历史版本一致。"""
+    return {
+        "product_info": state.get("product_info", ""),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "jobs": [
+            {k: job.get(k, [] if k == "copies" else "") for k in MANIFEST_JOB_KEYS}
+            for job in state.get("jobs", [])
+        ],
+    }
+
+
 def export_run(run_dir: Path) -> dict:
     """导出交付表 xlsx，并打包 交付包.zip（图片 + manifest + 交付表），返回文件路径。"""
-    state = runstate.load(run_dir) or runstate.default_state()
+    state = st.load(run_dir) or {}
     exportable = [j for j in state.get("jobs", []) if has_image(j)]
     if not exportable:
         raise ValueError("没有已出图的素材可导出")
@@ -427,8 +372,6 @@ def export_run(run_dir: Path) -> dict:
             p = Path(run_dir) / "images" / job["filename"]
             if p.exists():
                 zf.write(p, f"images/{job['filename']}")
-        manifest = Path(run_dir) / "manifest.json"
-        if manifest.exists():
-            zf.write(manifest, "manifest.json")
+        zf.writestr("manifest.json", json.dumps(_manifest_from_state(state), ensure_ascii=False, indent=2))
         zf.write(xlsx_path, xlsx_path.name)
     return {"xlsx": str(xlsx_path), "zip": str(zip_path), "images": len(exportable)}
