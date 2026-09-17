@@ -85,6 +85,9 @@
 
 ## 当前开发计划
 
+- [x] 部署工程第一阶段（2026-09-17）：Dockerfile 从源码构建前端、Compose 应用/PG/可选 Caddy、独立本地初始化与部署检查脚本入库准备；普通启动不再自动执行迁移。未更新正式服，详见 docs/部署与发布.md。
+- [ ] 部署工程第二阶段：测试环境隔离、依赖锁定、自动化测试与 CI、同一镜像从测试晋级正式、备份恢复与发布门禁。
+
 - [x] 移除 Streamlit 入口：2026-09-04 随数据层切 PostgreSQL 完成（app.py / pages_/ / .streamlit / core/runstate.py / core/db.py / prompts.json / scripts 已删除）
 - [x] Web 化阶段三：2026-09-03 合并 main（标签 v2.0-web；回滚锚点 v1-streamlit-final）
 - [x] Web 化阶段二：React 前端（Vite + TS + AntD，交互重新设计非复刻），构建产物 web/dist 由 FastAPI 托管
@@ -149,6 +152,8 @@
 - 用户可见的使用方式变化同步更新 README.md
 
 ## 变更日志
+
+- 2026-09-17：开始规范本地→测试→正式发布流程。新增容器部署文件、部署说明与脚本，使用 .deploy/local 隔离本地验证数据和密钥。原 docker-compose.yml 与业务接口不变；线上升级需先核对手写配置和数据卷，补 SITE_ADDRESS，显式执行迁移。本阶段尚未发布正式服。
 
 - 2026-08-27：项目初始化——四步工作流、提示词管理、设置页、key 环境变量方案、模型下拉框、连通性全链路测通；建立 git 仓库与本规范。
 - 2026-08-27：修复页面加载慢（35s+→秒级）——venv 迁至 WSL 原生磁盘 `~/venvs/meta-creative-tool`，关闭文件监听（决策 8）。

@@ -15,6 +15,9 @@ FastAPI + React Web 应用，数据层 **PostgreSQL**（结构化数据）+ 文�
 
 ## 启动
 
+新增：完整 Docker 部署、本地独立验证环境和后续测试/正式发布安排见 [部署与发布](docs/部署与发布.md)。
+该流程会从源码构建前端，显式执行数据库迁移；现有本地启动方式保持可用。
+
 **1. 数据库**（首次：复制 `.env.example` 为 `.env.local` 填好凭据；`~/.bashrc` 配 `DATABASE_URL`）：
 
 ```bash
