@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deployment-check:
+    name: Build and deployment smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Create isolated configuration without API keys
+        run: python3 scripts/init-local.py
+
+      - name: Validate deployment configuration
+        run: |
+          bash -n scripts/deploy.sh
+          bash scripts/deploy.sh .deploy/local.env check
+          SITE_ADDRESS=example.com bash scripts/deploy.sh .deploy/local.env check --https
+          docker run --rm -e SITE_ADDRESS=example.com \
+            --mount "type=bind,source=$PWD/Caddyfile,target=/etc/caddy/Caddyfile,readonly" \
+            caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      - name: Build application and frontend from source
+        run: bash scripts/deploy.sh .deploy/local.env build
+
+      - name: Initialize database and verify migration is repeatable
+        run: |
+          bash scripts/deploy.sh .deploy/local.env db
+          bash scripts/deploy.sh .deploy/local.env migrate
+          bash scripts/deploy.sh .deploy/local.env migrate
+
+      - name: Start and verify application
+        run: |
+          bash scripts/deploy.sh .deploy/local.env start
+          bash scripts/deploy.sh .deploy/local.env smoke
+          python3 -m unittest discover -s tests -p 'test_deployment.py' -v
+
+      - name: Show diagnostics on failure
+        if: failure()
+        run: |
+          bash scripts/deploy.sh .deploy/local.env status
+          bash scripts/deploy.sh .deploy/local.env logs
+
+      - name: Remove temporary CI containers and data
+        if: always()
+        run: docker compose --env-file .deploy/local.env -f compose.deploy.yml down -v --remove-orphans
