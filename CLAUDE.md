@@ -88,7 +88,7 @@
 - [x] 部署工程第一阶段（2026-09-17）：Dockerfile 从源码构建前端、Compose 应用/PG/可选 Caddy、独立本地初始化与部署检查脚本入库准备；普通启动不再自动执行迁移。未更新正式服，详见 docs/部署与发布.md。
 - [ ] 部署工程第二阶段：测试环境隔离、依赖锁定、自动化测试与 CI、同一镜像从测试晋级正式、备份恢复与发布门禁。
 - [x] 第二阶段第一步：新增 GitHub Actions CI 与独立本地/CI HTTP 集成用例，验证构建、重复迁移、产品/任务保存和默认提示词；常驻测试服和正式发布仍待实现。
-- [ ] 第二阶段第二步（准备中）：同机 staging 独立数据库/目录/受限资源、共享 Caddy 的独立 edge 网络、CI 导出同一已测试镜像制品；服务器待核对资源并接入。
+- [x] 第二阶段第二步：2026-09-17 同机 staging 已上线 https://test.wanghongyu.online；独立数据库/目录/受限资源、共享 Caddy 的独立 edge 网络，使用 CI 已验证镜像制品；正式 app/DB 未重启，详见 docs/同机测试环境.md 发布记录。
 
 - [x] 移除 Streamlit 入口：2026-09-04 随数据层切 PostgreSQL 完成（app.py / pages_/ / .streamlit / core/runstate.py / core/db.py / prompts.json / scripts 已删除）
 - [x] Web 化阶段三：2026-09-03 合并 main（标签 v2.0-web；回滚锚点 v1-streamlit-final）
