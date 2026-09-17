@@ -4,6 +4,12 @@ services:
   caddy:
     volumes:
       - ./deploy/staging.caddy:/etc/caddy/sites/staging.caddy:ro
+      - type: bind
+        source: ./.deploy/staging-auth.caddy
+        target: /etc/caddy/private/staging-auth.caddy
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - default
       - staging-edge

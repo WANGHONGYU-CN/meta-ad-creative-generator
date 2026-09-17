@@ -1,4 +1,5 @@
 test.wanghongyu.online {
+	import /etc/caddy/private/staging-auth.caddy
 	header X-Robots-Tag "noindex, nofollow"
 	header X-Deployment-Environment "staging"
 	reverse_proxy staging-app:8000

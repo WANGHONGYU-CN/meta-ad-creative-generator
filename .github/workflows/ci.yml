@@ -37,6 +37,7 @@ jobs:
             --mount "type=bind,source=$PWD/Caddyfile,target=/etc/caddy/Caddyfile,readonly" \
             caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
           python3 scripts/init-staging.py "meta-creative-tool:sha-${GITHUB_SHA}"
+          python3 scripts/init-staging-auth.py
           bash -n scripts/staging.sh
           bash scripts/staging.sh check
           SITE_ADDRESS=example.com docker compose --env-file .deploy/local.env -f compose.deploy.yml -f compose.https.yml -f compose.staging-edge.yml config -q
@@ -69,10 +70,12 @@ jobs:
           docker run --rm -e SITE_ADDRESS=example.com \
             --mount "type=bind,source=$PWD/.deploy/Caddyfile.shared-check,target=/etc/caddy/Caddyfile,readonly" \
             --mount "type=bind,source=$PWD/deploy/staging.caddy,target=/etc/caddy/sites/staging.caddy,readonly" \
+            --mount "type=bind,source=$PWD/.deploy/staging-auth.caddy,target=/etc/caddy/private/staging-auth.caddy,readonly" \
             caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
           docker run -d --name ci-staging-proxy --network meta-creative-staging_edge \
             -p 127.0.0.1:18081:8080 caddy:2 caddy reverse-proxy --from :8080 --to staging-app:8000
           curl --fail --retry 10 --retry-all-errors --retry-delay 1 --max-time 5 http://127.0.0.1:18081/api/health
+          python3 tests/check_staging_access.py
 
       - name: Package the tested image without rebuilding
         run: |
@@ -80,7 +83,7 @@ jobs:
           docker save "meta-creative-tool:sha-${GITHUB_SHA}" | gzip > .deploy/artifact/application-image.tar.gz
           printf '%s\n' "$GITHUB_SHA" > .deploy/artifact/SOURCE_COMMIT
           docker image inspect --format '{{.Id}}' "meta-creative-tool:sha-${GITHUB_SHA}" > .deploy/artifact/IMAGE_ID
-          tar -czf .deploy/artifact/staging-config.tar.gz compose.staging.yml compose.staging-edge.yml deploy/staging.caddy scripts/init-staging.py scripts/staging.sh
+          tar -czf .deploy/artifact/staging-config.tar.gz compose.staging.yml compose.staging-edge.yml deploy/staging.caddy scripts/init-staging.py scripts/init-staging-auth.py scripts/staging.sh
           cd .deploy/artifact
           sha256sum application-image.tar.gz staging-config.tar.gz SOURCE_COMMIT IMAGE_ID > SHA256SUMS
 
