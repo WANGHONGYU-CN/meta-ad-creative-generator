@@ -1,0 +1,14 @@
+# Third override for the EXISTING production Caddy, not a second Caddy instance.
+# First create the staging stack so its edge network exists.
+services:
+  caddy:
+    volumes:
+      - ./deploy/staging.caddy:/etc/caddy/sites/staging.caddy:ro
+    networks:
+      - default
+      - staging-edge
+
+networks:
+  staging-edge:
+    external: true
+    name: meta-creative-staging_edge

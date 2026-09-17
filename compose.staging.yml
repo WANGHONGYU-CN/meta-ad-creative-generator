@@ -1,0 +1,68 @@
+# Independent staging stack. Do not merge with compose.deploy.yml.
+name: meta-creative-staging
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "5m"
+    max-file: "2"
+
+services:
+  staging-db:
+    image: postgres:17
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    environment:
+      POSTGRES_USER: ${STAGING_DB_USER:?}
+      POSTGRES_PASSWORD: ${STAGING_DB_PASSWORD:?}
+      POSTGRES_DB: ${STAGING_DB_NAME:?}
+    command: ["postgres", "-c", "shared_buffers=32MB", "-c", "max_connections=30"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+  staging-app:
+    image: ${STAGING_IMAGE:?Use the exact image from a successful CI run}
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.75
+    depends_on:
+      staging-db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql+psycopg://${STAGING_DB_USER:?}:${STAGING_DB_PASSWORD:?}@staging-db:5432/${STAGING_DB_NAME:?}"
+    ports:
+      - "127.0.0.1:18001:8000"
+    volumes:
+      - ./.deploy/staging/outputs:/app/outputs
+      - ./.deploy/staging/data:/app/data
+      - ./.deploy/staging/logs:/app/logs
+      - type: bind
+        source: ./.deploy/staging/config.json
+        target: /app/config.json
+        bind:
+          create_host_path: false
+    networks: [database, edge]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/api/products', timeout=5); assert isinstance(json.load(r), list)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging: *logging
+
+volumes:
+  pgdata:
+
+networks:
+  database:
+    internal: true
+  edge:
+    name: meta-creative-staging_edge

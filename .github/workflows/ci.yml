@@ -36,6 +36,10 @@ jobs:
           docker run --rm -e SITE_ADDRESS=example.com \
             --mount "type=bind,source=$PWD/Caddyfile,target=/etc/caddy/Caddyfile,readonly" \
             caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          python3 scripts/init-staging.py "meta-creative-tool:sha-${GITHUB_SHA}"
+          bash -n scripts/staging.sh
+          bash scripts/staging.sh check
+          SITE_ADDRESS=example.com docker compose --env-file .deploy/local.env -f compose.deploy.yml -f compose.https.yml -f compose.staging-edge.yml config -q
 
       - name: Build application and frontend from source
         run: bash scripts/deploy.sh .deploy/local.env build
@@ -52,12 +56,53 @@ jobs:
           bash scripts/deploy.sh .deploy/local.env smoke
           python3 -m unittest discover -s tests -p 'test_deployment.py' -v
 
+      - name: Verify staging isolation and shared proxy
+        run: |
+          docker tag meta-creative-tool:local "meta-creative-tool:sha-${GITHUB_SHA}"
+          bash scripts/staging.sh db
+          bash scripts/staging.sh migrate
+          bash scripts/staging.sh start
+          TEST_BASE_URL=http://127.0.0.1:18001 python3 -m unittest discover -s tests -p 'test_deployment.py' -v
+          python3 tests/check_environment_isolation.py
+          cp Caddyfile .deploy/Caddyfile.shared-check
+          printf '\nimport /etc/caddy/sites/*.caddy\n' >> .deploy/Caddyfile.shared-check
+          docker run --rm -e SITE_ADDRESS=example.com \
+            --mount "type=bind,source=$PWD/.deploy/Caddyfile.shared-check,target=/etc/caddy/Caddyfile,readonly" \
+            --mount "type=bind,source=$PWD/deploy/staging.caddy,target=/etc/caddy/sites/staging.caddy,readonly" \
+            caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker run -d --name ci-staging-proxy --network meta-creative-staging_edge \
+            -p 127.0.0.1:18081:8080 caddy:2 caddy reverse-proxy --from :8080 --to staging-app:8000
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:18081/api/health
+
+      - name: Package the tested image without rebuilding
+        run: |
+          mkdir -p .deploy/artifact
+          docker save "meta-creative-tool:sha-${GITHUB_SHA}" | gzip > .deploy/artifact/application-image.tar.gz
+          printf '%s\n' "$GITHUB_SHA" > .deploy/artifact/SOURCE_COMMIT
+          docker image inspect --format '{{.Id}}' "meta-creative-tool:sha-${GITHUB_SHA}" > .deploy/artifact/IMAGE_ID
+          tar -czf .deploy/artifact/staging-config.tar.gz compose.staging.yml compose.staging-edge.yml deploy/staging.caddy scripts/init-staging.py scripts/staging.sh
+          cd .deploy/artifact
+          sha256sum application-image.tar.gz staging-config.tar.gz SOURCE_COMMIT IMAGE_ID > SHA256SUMS
+
+      - name: Upload tested deployment artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: deployment-${{ github.sha }}
+          path: .deploy/artifact/*
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+
       - name: Show diagnostics on failure
         if: failure()
         run: |
           bash scripts/deploy.sh .deploy/local.env status
           bash scripts/deploy.sh .deploy/local.env logs
+          bash scripts/staging.sh logs
 
       - name: Remove temporary CI containers and data
         if: always()
-        run: docker compose --env-file .deploy/local.env -f compose.deploy.yml down -v --remove-orphans
+        run: |
+          docker rm -f ci-staging-proxy || true
+          docker compose -p meta-creative-staging --env-file .deploy/staging.env -f compose.staging.yml down -v --remove-orphans
+          docker compose --env-file .deploy/local.env -f compose.deploy.yml down -v --remove-orphans
