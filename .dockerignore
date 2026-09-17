@@ -1,0 +1,17 @@
+*
+!requirements.txt
+!core/
+!core/**
+!server/
+!server/**
+!alembic/
+!alembic/**
+!alembic.ini
+!web/
+!web/**
+web/node_modules
+web/dist
+web/*.tsbuildinfo
+**/__pycache__
+**/*.pyc
+**/.env*

@@ -1,0 +1,57 @@
+# Standalone application stack; do not combine with docker-compose.yml.
+# The default project/volume names match the initial production deployment.
+name: ${COMPOSE_PROJECT_NAME:-meta-creative-deploy}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+  app:
+    image: ${APP_IMAGE:-meta-creative-tool:local}
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:?}"
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    volumes:
+      - ${RUNTIME_DIR:-.}/outputs:/app/outputs
+      - ${RUNTIME_DIR:-.}/data:/app/data
+      - ${RUNTIME_DIR:-.}/logs:/app/logs
+      - type: bind
+        source: ${RUNTIME_DIR:-.}/config.json
+        target: /app/config.json
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/api/products', timeout=5); assert isinstance(json.load(r), list)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging: *logging
+
+volumes:
+  pgdata:

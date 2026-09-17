@@ -34,3 +34,6 @@ logs/
 .DS_Store
 Thumbs.db
 web/tsconfig.tsbuildinfo
+
+# Isolated deployment environment files, credentials and runtime data
+.deploy/
