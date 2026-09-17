@@ -17,8 +17,10 @@ else:
     password = secrets.token_urlsafe(24)
     result = subprocess.run(
         ['docker', 'run', '--rm', 'caddy:2', 'caddy', 'hash-password', '--plaintext', password],
-        text=True, capture_output=True, check=True,
+        text=True, capture_output=True,
     )
+    if result.returncode:
+        raise SystemExit('Password hash generation failed; credentials were not created.')
     hashed = result.stdout.strip()
     if not hashed.startswith('$2') or '\n' in hashed:
         raise SystemExit('Unexpected password hash output.')
