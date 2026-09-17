@@ -17,7 +17,7 @@ else:
     password = secrets.token_urlsafe(24)
     result = subprocess.run(
         ['docker', 'run', '--rm', 'caddy:2', 'caddy', 'hash-password', '--plaintext', password],
-        text=True, capture_output=True,
+        universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if result.returncode:
         raise SystemExit('Password hash generation failed; credentials were not created.')
